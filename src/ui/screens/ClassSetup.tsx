@@ -1,45 +1,52 @@
 // Class set-up: class types, levels, lengths, focuses, timing, parts of the class and the lists.
-// The same for every studio. (On OpenPilates Server these live on the Studio page.)
+// Each studio has its own. (On OpenPilates Server these live on the Studio page.)
 import { useState } from 'react';
 import { BUILTIN, DEFAULT_FOCUSES, DEFAULT_LEVELS, DEFAULT_TIMING_ROWS, MUSCLES, SECTION_GROUPS, SEGMENT_ROLES, guessSection, isBuiltinTiming, isCoreLevel, labelOf, timingFromRows } from '../../engine';
 import { slugify, uid } from '../../lib/clean';
-import { library, setSetup, useData } from '../../lib/store';
-import type { ClassType, Named, Phase, Setup } from '../../lib/types';
-import { Back, Chips, Empty, Field, Icon, Row, Screen, Sheet, Stepper, Switch, toast } from '../bits';
+import { applySetup, getData, library, saveStudio, useData } from '../../lib/store';
+import { draftOf, editDraft, markSaved, openDraft, undoDraft } from '../../lib/drafts';
+import type { ClassType, Named, Phase, Setup, Studio } from '../../lib/types';
+import { Back, Chips, Empty, Field, Icon, Row, SaveButton, Screen, Sheet, Stepper, Switch, toast, useEditing } from '../bits';
 import { nav } from '../nav';
 
 type L = { id: string; label: string; group?: string }[];
 const SPANS: [number, number, string][] = [[1, 1, 'Beginner'], [1, 2, 'Beginner + intermediate'], [2, 2, 'Intermediate'], [2, 3, 'Intermediate + advanced'], [3, 3, 'Advanced'], [1, 3, 'All of it']];
 const makeId = (prefix: string, label: string, taken: string[]) => { let id = prefix + (slugify(label).replace(/-/g, '_') || 'item'); while (taken.includes(id)) id += '_2'; return id; };
 
-// Undo and redo for the whole of Class set-up, for as long as the app is open.
-const past: Setup[] = [];
-const future: Setup[] = [];
-let typedAt = 0;
+// Every part of Class set-up edits the same unsaved copy of the studio (lib/drafts.ts) until Save.
+let editing = '';
+let studioId = '';
+const undo = () => { undoDraft(editing); };
 function change(fn: (s: Setup) => void, typing = false) {
-  setSetup((cur) => {
-    const next = structuredClone(cur);
-    fn(next);
-    next.timing = timingFromRows(next.timingRows) as Record<string, number>;
-    const now = Date.now();
-    if (!(typing && typedAt && now - typedAt < 1500 && past.length)) { past.push(cur); if (past.length > 80) past.shift(); }
-    typedAt = typing ? now : 0;
-    future.length = 0;
-    return next;
-  });
+  editDraft<Studio>(editing, (st) => { fn(st.setup); st.setup.timing = timingFromRows(st.setup.timingRows) as Record<string, number>; }, typing);
 }
-const undo = () => { const p = past.pop(); if (p) setSetup((cur) => { future.push(cur); return p; }); typedAt = 0; };
-const redo = () => { const f = future.pop(); if (f) setSetup((cur) => { past.push(cur); return f; }); typedAt = 0; };
-const UndoRedo = () => (
-  <div className="row" style={{ gap: 6 }}><span className="m">Saved</span>
-    <button type="button" className="btn icon" aria-label="Undo" disabled={!past.length} onClick={undo}><Icon name="undo" size={18} /></button>
-    <button type="button" className="btn icon" aria-label="Redo" disabled={!future.length} onClick={redo}><Icon name="redo" size={18} /></button></div>
-);
+export const studioKey = (id: string) => `studio:${id}`;
+/** Saves the studio being edited. A new one needs a name first. */
+export function saveStudioDraft(id: string): boolean {
+  const s = draftOf<Studio>(studioKey(id));
+  if (!s) return true;
+  if (!s.name.trim()) { toast('Give the studio a name first.'); return false; }
+  saveStudio({ ...s, name: s.name.trim() });
+  markSaved(studioKey(id));
+  return true;
+}
+let topSave: { dirty: boolean; save: () => void } = { dirty: false, save: () => undefined };
+const UndoRedo = () => <SaveButton dirty={topSave.dirty} onSave={topSave.save} />;
 const Top = ({ title, sub, back = 'Class set-up' }: { title: string; sub?: string; back?: string }) => <><div className="row between"><Back label={back} /><UndoRedo /></div><h1>{title}</h1>{sub ? <div className="m" style={{ marginTop: 4 }}>{sub}</div> : null}</>;
 
-export function SetupScreen({ part, id }: { part?: string; id?: string }) {
-  const d = useData();
-  const s = d.setup;
+export function SetupScreen({ studio: studioIdProp, part, id }: { studio: string; part?: string; id?: string }) {
+  const sid = studioIdProp;
+  useData();
+  const key = studioKey(sid);
+  const saved = getData().studios.find((x) => x.id === sid);
+  const st = draftOf<Studio>(key) || (saved ? openDraft(key, saved) : undefined);
+  const dirty = useEditing(key, st?.name ? `changes to ${st.name}` : 'this studio', () => saveStudioDraft(sid));
+  if (!st) return <Screen top={<><Back /><h1>Studio not found</h1></>}><Empty title="This studio is no longer here" /></Screen>;
+  editing = key;
+  studioId = studioIdProp;
+  topSave = { dirty, save: () => { if (saveStudioDraft(sid)) toast('Saved.'); } };
+  applySetup(st.setup);
+  const s = st.setup;
   if (part === 'types') return <Types s={s} />;
   if (part === 'type' && id) return <TypeEdit s={s} id={id} />;
   if (part === 'levels') return <Levels s={s} />;
@@ -49,15 +56,15 @@ export function SetupScreen({ part, id }: { part?: string; id?: string }) {
   if (part === 'lists') return <Lists s={s} />;
   if (part === 'targets') return <Targets s={s} />;
   return (
-    <Screen narrow top={<Top title="Class set-up" back="More" sub="How your classes are set up, the same at every studio. Set it once and new classes start from it." />}>
+    <Screen narrow top={<Top title="Class set-up" back={st.name || 'Studio'} sub={`How classes are set up at ${st.name || 'this studio'}. New classes here start from it.`} />}>
       <div className="card flush">
-        <Row icon="classes" title="Class types" sub={s.classTypes.map((c) => c.name).join(', ')} onClick={() => nav.go({ name: 'setup', part: 'types' })} />
-        <Row icon="up" title="Class levels" sub={s.levels.map((l) => l.label).join(', ')} onClick={() => nav.go({ name: 'setup', part: 'levels' })} />
-        <Row icon="spark" title="Focuses" sub={`${s.focuses.length} to choose from`} onClick={() => nav.go({ name: 'setup', part: 'focuses' })} />
-        <Row icon="clock" title="Lengths and timing" sub={`${s.lengths.join(', ')} min · spring changes, layers, your own timed lines`} onClick={() => nav.go({ name: 'setup', part: 'timing' })} />
-        <Row icon="library" title="Parts of the class" sub="How the library is grouped" onClick={() => nav.go({ name: 'setup', part: 'parts' })} />
-        <Row icon="list" title="Props and muscle names" sub="Add your own, take out what you never use" onClick={() => nav.go({ name: 'setup', part: 'lists' })} />
-        <Row icon="check" title="What a balanced class means" sub={Object.values(s.targets).map((t) => t.label).join(', ')} onClick={() => nav.go({ name: 'setup', part: 'targets' })} />
+        <Row icon="classes" title="Class types" sub={s.classTypes.map((c) => c.name).join(', ')} onClick={() => nav.go({ name: 'setup', studio: sid, part: 'types' })} />
+        <Row icon="up" title="Class levels" sub={s.levels.map((l) => l.label).join(', ')} onClick={() => nav.go({ name: 'setup', studio: sid, part: 'levels' })} />
+        <Row icon="spark" title="Focuses" sub={`${s.focuses.length} to choose from`} onClick={() => nav.go({ name: 'setup', studio: sid, part: 'focuses' })} />
+        <Row icon="clock" title="Lengths and timing" sub={`${s.lengths.join(', ')} min · spring changes, layers, your own timed lines`} onClick={() => nav.go({ name: 'setup', studio: sid, part: 'timing' })} />
+        <Row icon="library" title="Parts of the class" sub="How the library is grouped" onClick={() => nav.go({ name: 'setup', studio: sid, part: 'parts' })} />
+        <Row icon="list" title="Props and muscle names" sub="Add your own, take out what you never use" onClick={() => nav.go({ name: 'setup', studio: sid, part: 'lists' })} />
+        <Row icon="check" title="What a balanced class means" sub={Object.values(s.targets).map((t) => t.label).join(', ')} onClick={() => nav.go({ name: 'setup', studio: sid, part: 'targets' })} />
       </div>
     </Screen>
   );
@@ -65,10 +72,11 @@ export function SetupScreen({ part, id }: { part?: string; id?: string }) {
 
 const usesPhases = (ct: ClassType) => !ct.noPhases && ct.phases.length > 0;
 function Types({ s }: { s: Setup }) {
-  const add = () => { const id = uid('ct'); change((x) => { x.classTypes.push({ id, name: 'New class', apparatus: 'reformer', lengthMin: x.defaultLength, springBudget: 0, phases: [{ name: 'Warm-up', role: 'warmup', minutes: 6, sections: [] }, { name: 'Main', role: 'build', minutes: Math.max(10, x.defaultLength - 11), sections: [] }, { name: 'Cool-down', role: 'cooldown', minutes: 5, sections: [] }] }); }); nav.go({ name: 'setup', part: 'type', id }); };
+  const add = () => { const id = uid('ct'); change((x) => { x.classTypes.push({ id, name: 'New class', apparatus: 'reformer', lengthMin: x.defaultLength, springBudget: 0, phases: [{ name: 'Warm-up', role: 'warmup', minutes: 6, sections: [] }, { name: 'Main', role: 'build', minutes: Math.max(10, x.defaultLength - 11), sections: [] }, { name: 'Cool-down', role: 'cooldown', minutes: 5, sections: [] }] }); }); nav.go({ name: 'setup', studio: studioId, part: 'type', id }); };
   return (
     <Screen narrow top={<Top title="Class types" sub="The classes on your timetable. A new class starts from one, with everything you set here already chosen." />}>
-      <div className="card flush">{s.classTypes.map((c) => <Row key={c.id} title={c.name} sub={[`${c.lengthMin} min`, c.apparatus === 'mat' ? 'Mat' : 'Reformer', usesPhases(c) ? `${c.phases.length} phases` : 'no phases', c.apparatus !== 'mat' && c.springBudget > 0 ? `up to ${c.springBudget} spring changes` : ''].filter(Boolean).join(' · ')} onClick={() => nav.go({ name: 'setup', part: 'type', id: c.id })} />)}</div>
+      {!s.classTypes.length ? <Empty title="No class types yet" text="Add the classes on your timetable here, or make your first class and the app walks you through it." /> : null}
+      <div className="card flush">{s.classTypes.map((c) => <Row key={c.id} title={c.name} sub={[`${c.lengthMin} min`, c.apparatus === 'mat' ? 'Mat' : 'Reformer', usesPhases(c) ? `${c.phases.length} phases` : 'no phases', c.apparatus !== 'mat' && c.springBudget > 0 ? `up to ${c.springBudget} spring changes` : ''].filter(Boolean).join(' · ')} onClick={() => nav.go({ name: 'setup', studio: studioId, part: 'type', id: c.id })} />)}</div>
       <button type="button" className="btn" onClick={add}><Icon name="plus" size={18} />Add a class type</button>
     </Screen>
   );
@@ -108,7 +116,7 @@ function TypeEdit({ s, id }: { s: Setup; id: string }) {
       </> : <p className="m" style={{ padding: '0 4px' }}>A new class of this type is one list of blocks. Drafts still open with a warm-up and finish with a cool-down.{ct.phases.length ? ' The phases you set up are kept for when you switch this back on.' : ''}</p>}
       <div className="card flush">
         <Row icon="copy" title="Duplicate" onClick={() => { const nid = uid('ct'); change((x) => { x.classTypes.push({ ...structuredClone(ct), id: nid, name: `${ct.name} copy` }); }); nav.back(); toast('Duplicated.'); }} />
-        <Row icon="trash" danger title="Delete this class type" sub="Classes already made from it stay as they are" onClick={s.classTypes.length > 1 ? () => { change((x) => { x.classTypes = x.classTypes.filter((c) => c.id !== id); }); nav.back(); toast(`${ct.name} deleted.`, { label: 'Undo', run: undo }); } : undefined} right={s.classTypes.length > 1 ? undefined : <span className="tiny">Only one</span>} />
+        <Row icon="trash" danger title="Delete this class type" sub="Classes already made from it stay as they are" onClick={true ? () => { change((x) => { x.classTypes = x.classTypes.filter((c) => c.id !== id); }); nav.back(); toast(`${ct.name} deleted.`, { label: 'Undo', run: undo }); } : undefined} right={s.classTypes.length > 1 ? undefined : <span className="tiny">Only one</span>} />
       </div>
       {ph ? (
         <Sheet title="Phase" onClose={() => setOpen(-1)}>
@@ -268,7 +276,7 @@ function Lists({ s }: { s: Setup }) {
   const B = BUILTIN as { equipment: L; muscles: L };
   return (
     <Screen narrow top={<Top title="Props and muscle names" sub="Removing something never deletes a movement that mentions it." />}>
-      <ListCard title="Props" hint="What a studio can have. Tick which ones each studio has in My studios." builtin={B.equipment} custom={s.customProps} removed={s.removedProps} prefix="p_" onChange={(c, r) => change((x) => { x.customProps = c; x.removedProps = r; })} />
+      <ListCard title="Props" hint="The props this studio can name. Say how many you own on the studio page." builtin={B.equipment} custom={s.customProps} removed={s.removedProps} prefix="p_" onChange={(c, r) => change((x) => { x.customProps = c; x.removedProps = r; })} />
       <ListCard title="Muscles" hint="The names used on movements and in the balance charts." builtin={B.muscles} custom={s.customMuscles} removed={s.removedMuscles} prefix="m_" onChange={(c, r) => change((x) => { x.customMuscles = c; x.removedMuscles = r; })} />
     </Screen>
   );

@@ -1,9 +1,9 @@
 // The files the app writes and reads: a backup of everything, one class to share, one studio's
 // set-up to share, and the flow and pack files OpenPilates Server exports.
-import { cleanData, cleanMovement, cleanPlan, cleanSeries, cleanSetup, cleanStudio, nowIso, slugify, uid } from './clean';
+import { cleanData, cleanMovement, cleanPlan, cleanSeries, cleanStudio, nowIso, slugify, uid } from './clean';
 import { getData, isLibrary, library, replaceAll, update } from './store';
 import { deleteBackup, listBackups, writeBackup } from './storage';
-import type { ClassPlan, Data, Movement, Series, Setup, Studio } from './types';
+import type { ClassPlan, Data, Movement, Series, Studio } from './types';
 
 declare const __APP_VERSION__: string;
 export const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev';
@@ -13,7 +13,7 @@ export class FileProblem extends Error {}
 // ---- writing
 
 export function backupText(d: Data = getData()): string {
-  return JSON.stringify({ openpilates: 'backup', version: 1, app: APP_VERSION, exportedAt: nowIso(), device: d.settings.deviceName, data: d });
+  return JSON.stringify({ openpilates: 'backup', version: 2, app: APP_VERSION, exportedAt: nowIso(), device: d.settings.deviceName, data: d });
 }
 
 /** The movements a class uses that aren't in the built-in library as shipped (made or changed here). */
@@ -33,12 +33,28 @@ export function classText(plan: ClassPlan, studio: Studio | undefined, take: Cla
   });
 }
 export const studioText = (studio: Studio) => JSON.stringify({ openpilates: 'studio', version: 1, app: APP_VERSION, exportedAt: nowIso(), studio });
-export const fileNameFor = (title: string, kind: 'class' | 'studio' | 'backup') => {
+/**
+ * A pack, the way OpenPilates Server makes them: one studio's set-up and reformers, your own and
+ * changed movements, your series, what you took out of the library, and classes. The server and
+ * this app can both read it.
+ */
+export function packText(studio: Studio, opts: { classes: 'all' | 'studio' | 'none' }): string {
+  const d = getData();
+  const flows = opts.classes === 'none' ? [] : d.classes.filter((c) => opts.classes === 'all' || c.studioId === studio.id).map((c) => { const f: Record<string, unknown> = { ...c }; delete f.id; delete f.studioId; delete f.when; return f; });
+  const room = { id: 'r1', name: studio.name, apparatus: studio.hasReformers ? 'reformer' : 'mat', brand: studio.brand, reformers: studio.reformers, springs: studio.springs, springOverrides: studio.springOverrides };
+  return JSON.stringify({
+    openpilates: 'pack', version: 1, app: APP_VERSION, exportedAt: nowIso(), from: d.settings.deviceName,
+    studio: { ...studio.setup, name: studio.name, props: studio.props, rooms: [room] },
+    movements: Object.values(d.movements), series: d.series, flows,
+    visibility: { hide: d.hidden, show: d.shown },
+  });
+}
+export const fileNameFor = (title: string, kind: 'class' | 'studio' | 'backup' | 'pack') => {
   const stamp = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   const day = `${stamp.getFullYear()}-${p(stamp.getMonth() + 1)}-${p(stamp.getDate())}`;
   if (kind === 'backup') return `openpilates-backup-${day}-${p(stamp.getHours())}${p(stamp.getMinutes())}.json`;
-  return `${slugify(title) || kind}.openpilates${kind === 'studio' ? '-studio' : ''}.json`;
+  return `${slugify(title) || kind}.openpilates${kind === 'studio' ? '-studio' : kind === 'pack' ? '-pack' : ''}.json`;
 };
 
 // ---- reading
@@ -51,7 +67,6 @@ export interface Incoming {
   movements: Movement[];
   series: Series[];
   studios: Studio[];
-  setup?: Setup;
   hidden: string[];
   shown: string[];
   backup?: Data;
@@ -70,9 +85,9 @@ export function readIncoming(text: string): Incoming {
   const mvs = (v: unknown) => (Array.isArray(v) ? v.slice(0, 2000).map(cleanMovement).filter(Boolean) : []) as Movement[];
   const base = { from, madeAt, classes: [], movements: [], series: [], studios: [], hidden: [], shown: [] };
   if (j.openpilates === 'backup' && j.data) {
-    if (Number(j.version) > 1) throw new FileProblem('That backup was made by a newer OpenPilates. Update the app, then restore it.');
+    if (Number(j.version) > 2) throw new FileProblem('That backup was made by a newer OpenPilates. Update the app, then restore it.');
     const d = cleanData(j.data);
-    return { ...base, kind: 'backup', backup: d, classes: d.classes, movements: Object.values(d.movements), series: d.series, studios: d.studios, setup: d.setup, hidden: d.hidden, shown: d.shown };
+    return { ...base, kind: 'backup', backup: d, classes: d.classes, movements: Object.values(d.movements), series: d.series, studios: d.studios, hidden: d.hidden, shown: d.shown };
   }
   if (j.openpilates === 'flow' && j.flow) {
     const plan = cleanPlan(j.flow);
@@ -80,18 +95,17 @@ export function readIncoming(text: string): Incoming {
   }
   if (j.openpilates === 'studio' && j.studio) return { ...base, kind: 'studio', studios: [cleanStudio(j.studio)] };
   if (j.openpilates === 'pack') {
-    // From OpenPilates Server: its Studio page becomes the class set-up, and each reformer room a studio.
+    // From OpenPilates Server: each reformer room becomes a studio, with the Studio page as its class set-up.
     const st = (j.studio && typeof j.studio === 'object' ? j.studio : {}) as Record<string, unknown>;
     const rooms = (Array.isArray(st.rooms) ? st.rooms : []) as Record<string, unknown>[];
     const str60 = (v: unknown) => (typeof v === 'string' ? v.trim().slice(0, 60) : '');
     const packName = str60(st.name) || from || 'Studio';
     const reformerRooms = rooms.filter((r) => r && r.apparatus !== 'mat');
-    const studios = (reformerRooms.length ? reformerRooms : rooms.slice(0, 1)).map((r) => cleanStudio({ ...r, id: undefined, name: reformerRooms.length > 1 ? `${packName} · ${String(r.name || 'room')}` : str60(st.name) || from || String(r.name || 'Studio') }, st.props as Record<string, unknown>));
+    const studios = (reformerRooms.length ? reformerRooms : rooms.slice(0, 1)).map((r) => cleanStudio({ ...r, id: undefined, name: reformerRooms.length > 1 ? `${packName} · ${String(r.name || 'room')}` : str60(st.name) || from || String(r.name || 'Studio') }, st.props as Record<string, unknown>, Object.keys(st).length ? st : undefined));
     const vis = (j.visibility && typeof j.visibility === 'object' ? j.visibility : {}) as Record<string, unknown>;
     const sl = (v: unknown) => (Array.isArray(v) ? v.map(slugify).filter(Boolean).slice(0, 3000) : []);
     return {
       ...base, kind: 'pack', studios,
-      setup: Object.keys(st).length ? cleanSetup(st) : undefined,
       movements: mvs(j.movements),
       series: (Array.isArray(j.series) ? j.series.map(cleanSeries).filter(Boolean) : []) as Series[],
       classes: (Array.isArray(j.flows) ? j.flows.slice(0, 2000).map((f) => ({ ...cleanPlan(f), ...(from ? { from } : {}) })) : []) as ClassPlan[],
@@ -101,12 +115,12 @@ export function readIncoming(text: string): Incoming {
   throw new FileProblem("That isn't an OpenPilates file. Classes end in .openpilates.json; backups start with openpilates-backup.");
 }
 
-export interface Take { classes: boolean; movements: boolean; studios: boolean; setup: boolean; series: boolean }
-export interface Brought { classes: number; movements: number; studios: number; series: number; setup: boolean; skipped: number; firstClass?: string }
+export interface Take { classes: boolean; movements: boolean; studios: boolean; series: boolean }
+export interface Brought { classes: number; movements: number; studios: number; series: number; skipped: number; firstClass?: string }
 
-/** Adds what was ticked alongside what is already here. Nothing already on the device is changed, except the class set-up when it is ticked. */
+/** Adds what was ticked alongside what is already here. Nothing already on the device is changed. */
 export function bringIn(inc: Incoming, take: Take): Brought {
-  const out: Brought = { classes: 0, movements: 0, studios: 0, series: 0, setup: false, skipped: 0 };
+  const out: Brought = { classes: 0, movements: 0, studios: 0, series: 0, skipped: 0 };
   update((d) => {
     if (take.movements && inc.movements.length) {
       const next = { ...d.movements };
@@ -138,7 +152,6 @@ export function bringIn(inc: Incoming, take: Take): Brought {
       out.series = add.length;
       d.series = [...d.series, ...add];
     }
-    if (take.setup && inc.setup) { d.setup = inc.setup; out.setup = true; }
     if (take.classes && inc.classes.length) {
       const fresh = inc.classes.map((c) => ({ ...c, id: uid('c'), ...(c.studioId && studioIds.get(c.studioId) ? { studioId: studioIds.get(c.studioId) } : { studioId: undefined }) }));
       out.classes = fresh.length;
@@ -159,11 +172,11 @@ export function restoreBackup(inc: Incoming, how: 'replace' | 'add'): Brought {
   if (how === 'replace') {
     const b = inc.backup;
     replaceAll({ ...b, settings: { ...b.settings, welcomed: true } });
-    return { classes: b.classes.length, movements: Object.keys(b.movements).length, studios: b.studios.length, series: b.series.length, setup: true, skipped: 0 };
+    return { classes: b.classes.length, movements: Object.keys(b.movements).length, studios: b.studios.length, series: b.series.length, skipped: 0 };
   }
   const have = new Set(getData().classes.map((c) => c.id));
   const haveTaught = new Set(getData().taught.map((t) => t.id));
-  const out = bringIn({ ...inc, classes: [] }, { classes: false, movements: true, studios: true, setup: false, series: true });
+  const out = bringIn({ ...inc, classes: [] }, { classes: false, movements: true, studios: true, series: true });
   update((d) => {
     const add = inc.backup!.classes.filter((c) => !have.has(c.id));
     out.classes = add.length;
@@ -199,5 +212,5 @@ export async function backupIfDue(now = Date.now()): Promise<boolean> {
   return true;
 }
 
-export const summarise = (inc: Incoming) => ({ classes: inc.classes.length, movements: inc.movements.length, studios: inc.studios.length, series: inc.series.length, setup: !!inc.setup, taught: inc.backup?.taught.length ?? 0 });
+export const summarise = (inc: Incoming) => ({ classes: inc.classes.length, movements: inc.movements.length, studios: inc.studios.length, series: inc.series.length, taught: inc.backup?.taught.length ?? 0 });
 export const libraryCount = () => library().list.length;

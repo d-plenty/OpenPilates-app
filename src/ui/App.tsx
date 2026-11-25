@@ -2,7 +2,8 @@
 import { Component, useEffect, type ReactNode } from 'react';
 import { backupIfDue } from '../lib/files';
 import { flushSave, saveError, useData } from '../lib/store';
-import { Icon, Overlays } from './bits';
+import { Icon, Overlays, Spot } from './bits';
+import { useDrafts } from '../lib/drafts';
 import { nav, useNav, type Route, type Tab } from './nav';
 import { AnalysisScreen, BlockScreen, BuilderScreen, RunSheetScreen } from './screens/Builder';
 import { CalendarScreen } from './screens/Calendar';
@@ -10,8 +11,8 @@ import { ClassesScreen, NewClassScreen } from './screens/Classes';
 import { SetupScreen } from './screens/ClassSetup';
 import { LibraryScreen, MovementEditScreen, MovementScreen, SeriesScreen } from './screens/Library';
 import { PlayHost } from './screens/Play';
-import { AboutScreen, GuideScreen, LookScreen, MoreScreen, SettingsScreen } from './screens/Settings';
-import { BackupsScreen, ShareScreen } from './screens/Share';
+import { A11yScreen, AboutScreen, GuideScreen, LookScreen, MoreScreen, SettingsScreen, settingsNow } from './screens/Settings';
+import { BackupsScreen, PackScreen, ShareScreen } from './screens/Share';
 import { StudioScreen, StudiosScreen } from './screens/Studios';
 import { Welcome } from './screens/Welcome';
 import { applyTheme } from './theme';
@@ -46,7 +47,9 @@ function screenFor(tab: Tab, r?: Route) {
     case 'series': return <SeriesScreen slug={id} />;
     case 'studios': return <StudiosScreen />;
     case 'studio': return <StudioScreen id={id} />;
-    case 'setup': return <SetupScreen part={r.part as string | undefined} id={id || undefined} />;
+    case 'setup': return <SetupScreen studio={String(r.studio || '')} part={r.part as string | undefined} id={id || undefined} />;
+    case 'a11y': return <A11yScreen />;
+    case 'pack': return <PackScreen />;
     case 'share': return <ShareScreen classId={r.classId as string | undefined} studioId={r.studioId as string | undefined} />;
     case 'backups': return <BackupsScreen />;
     case 'settings': return <SettingsScreen />;
@@ -58,15 +61,19 @@ function screenFor(tab: Tab, r?: Route) {
 }
 
 export function App() {
-  const d = useData();
+  useData();
   const n = useNav();
-  useEffect(() => { applyTheme(d.settings); }, [d.settings]);
+  useDrafts();
+  // Look and colours show straight away while they are being edited, before Save.
+  const look = settingsNow();
+  useEffect(() => { applyTheme(look); }, [look]);
   useEffect(() => {
     const mq = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
-    const on = () => applyTheme(d.settings);
+    const on = () => applyTheme(settingsNow());
     mq?.addEventListener('change', on);
     return () => mq?.removeEventListener('change', on);
-  }, [d.settings]);
+  }, []);
+  const d = useData();
   // Save straight away when the app goes to the background, and back up when it opens or returns.
   useEffect(() => {
     const vis = () => { if (document.visibilityState === 'hidden') void flushSave(); else void backupIfDue().catch(() => undefined); };
@@ -84,13 +91,13 @@ export function App() {
       <div className="shell">
         <nav className="sidebar" aria-label="Main">
           <div className="brand"><img src="./icon.svg" width={30} height={30} alt="" style={{ borderRadius: 7 }} />OpenPilates</div>
-          {TABS.map((t) => <button type="button" key={t.id} className={n.tab === t.id ? 'cur' : ''} aria-current={n.tab === t.id ? 'page' : undefined} onClick={() => nav.tab(t.id)}><Icon name={t.icon} />{t.label}</button>)}
+          {TABS.map((t) => <button type="button" key={t.id} className={n.tab === t.id ? 'cur' : ''} aria-current={n.tab === t.id ? 'page' : undefined} onClick={() => void nav.tab(t.id)}><Icon name={t.icon} />{t.label}</button>)}
         </nav>
-        <div className="pane with-tabs" key={key}><Guard>{screenFor(n.tab, top)}</Guard></div>
+        <div className="pane with-tabs" key={key}><Spot.Provider value={{ tab: n.tab, depth: stack.length }}><Guard>{screenFor(n.tab, top)}</Guard></Spot.Provider></div>
       </div>
       {saveError() ? <div className="card" role="alert" style={{ margin: 8, background: 'var(--warn-bg)', borderColor: 'var(--warn-line)', color: 'var(--warn)' }}>Your last change couldn't be saved to this device: {saveError()}</div> : null}
       <nav className="tabbar" aria-label="Main">
-        {TABS.map((t) => <button type="button" key={t.id} className={n.tab === t.id ? 'cur' : ''} aria-current={n.tab === t.id ? 'page' : undefined} onClick={() => nav.tab(t.id)}><Icon name={t.icon} size={22} />{t.label}</button>)}
+        {TABS.map((t) => <button type="button" key={t.id} className={n.tab === t.id ? 'cur' : ''} aria-current={n.tab === t.id ? 'page' : undefined} onClick={() => void nav.tab(t.id)}><Icon name={t.icon} size={22} />{t.label}</button>)}
       </nav>
       <PlayHost />
       <Overlays />

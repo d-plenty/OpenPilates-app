@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { itemDuration, labelOf, layersOf, POSITIONS, EQUIPMENT } from '../../engine';
 import { keepAwake } from '../../lib/native';
-import { analyse, getData, library, logTaught, studioOf, timingFor, useData } from '../../lib/store';
+import { analyse, applySetup, getData, library, logTaught, studioOf, timingFor, useData } from '../../lib/store';
 import type { ClassPlan, Item, Movement, Segment, Studio } from '../../lib/types';
 import { Frames, Icon, Sheet, Springs, fmtClock, springText, toast } from '../bits';
 import { nav, useNav } from '../nav';
@@ -20,8 +20,9 @@ export function startPlay(plan: ClassPlan) {
 function missingAt(plan: ClassPlan, studio: Studio): string[] {
   const lib = library().map;
   const need = new Set<string>();
-  for (const s of plan.segments) for (const i of s.items) for (const e of (i.slug && lib[i.slug]?.equipment) || []) if (!(Number(studio.props[e]) > 0)) need.add(e);
-  return [...need].map((e) => labelOf(EQUIPMENT, e) as string);
+  for (const s of plan.segments) for (const i of s.items) for (const e of [...((i.slug && lib[i.slug]?.equipment) || []), ...(i.props || [])]) if (!(Number(studio.props[e]) > 0)) need.add(e);
+  applySetup(studio.setup);
+  return [...need].map((e) => (plan.extraProps || []).find((x) => x.id === e)?.label || (labelOf(EQUIPMENT, e) as string));
 }
 
 export function PlayHost() {

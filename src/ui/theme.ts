@@ -35,6 +35,7 @@ export function applyTheme(s: Settings): void {
   root.dataset.theme = dark ? 'dark' : 'light';
   root.dataset.black = s.trueBlack ? 'on' : 'off';
   root.dataset.text = s.textSize;
+  for (const [k, on] of Object.entries(s.a11y || {})) { if (on) root.dataset[k] = '1'; else delete root.dataset[k]; }
   for (const [k, v] of Object.entries(accentVars(accentOf(s), dark))) root.style.setProperty(k, v);
   document.querySelector('meta[name=theme-color]')?.setAttribute('content', dark ? (s.trueBlack ? '#101413' : '#1A2220') : '#FFFFFF');
 }

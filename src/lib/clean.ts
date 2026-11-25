@@ -1,6 +1,6 @@
 // Everything that comes in from outside the app (a file, a QR send, a backup) goes through here
 // first, so a damaged or hand-edited file can't put nonsense into what the app keeps.
-import { CATEGORIES, HEADREST, PATTERNS, PLANES, POSE_IDS, POSITIONS, PREGNANCY, ROLES as ROLES_OF_MOVEMENT, SECTIONS, SPINE, STRAPS, BRANDS, DEFAULT_CLASS_TYPES, DEFAULT_FOCUSES, DEFAULT_LENGTHS, DEFAULT_LEVELS, DEFAULT_TARGETS, DEFAULT_TIMING_ROWS, EQUIPMENT, LOAD_LEVELS, SEGMENT_ROLES, isBuiltinTiming, timingFromRows, timingRowsOf, withCoreLevels } from '../engine';
+import { CORE_LEVELS, CATEGORIES, HEADREST, PATTERNS, PLANES, POSE_IDS, POSITIONS, PREGNANCY, ROLES as ROLES_OF_MOVEMENT, SECTIONS, SPINE, STRAPS, BRANDS, DEFAULT_CLASS_TYPES, DEFAULT_FOCUSES, DEFAULT_LENGTHS, DEFAULT_LEVELS, DEFAULT_TARGETS, DEFAULT_TIMING_ROWS, EQUIPMENT, LOAD_LEVELS, SEGMENT_ROLES, isBuiltinTiming, timingFromRows, timingRowsOf, withCoreLevels } from '../engine';
 import type { ClassPlan, ClassType, Data, Item, Movement, Named, Segment, Series, Settings, Setup, Studio, Taught, TimingRow } from './types';
 
 export const uid = (prefix = '') => prefix + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -12,6 +12,21 @@ const list = <T>(v: unknown, max: number): T[] => (Array.isArray(v) ? (v.slice(0
 const ID = /^[a-z0-9_-]{1,60}$/i;
 const LOADS = new Set<string>(LOAD_LEVELS as string[]);
 const ROLES = new Set<string>((SEGMENT_ROLES as { id: string }[]).map((r) => r.id));
+
+const named = (v: unknown, prefix: string, max = 40): Named[] => {
+  const seen = new Set<string>();
+  const out: Named[] = [];
+  for (const x of list<Record<string, unknown>>(v, max)) {
+    const label = str(x && x.label, 40);
+    if (!label) continue;
+    let id = ID.test(String(x.id || '')) ? String(x.id) : prefix + slugify(label).replace(/-/g, '_');
+    while (seen.has(id)) id += '_2';
+    seen.add(id);
+    out.push({ id, label, ...(['lower', 'upper', 'core', 'stretch'].includes(String(x.group)) ? { group: String(x.group) } : {}) });
+  }
+  return out;
+};
+const ids = (v: unknown, max = 60) => list<unknown>(v, max).map(String).filter((x) => ID.test(x));
 
 function cleanItem(i: Record<string, unknown>): Item | null {
   if (!i || typeof i !== 'object') return null;
@@ -36,6 +51,7 @@ function cleanItem(i: Record<string, unknown>): Item | null {
     ...(str(i.finisher, 160) ? { finisher: str(i.finisher, 160) } : {}),
     ...(str(i.note, 500) ? { note: str(i.note, 500) } : {}),
     ...(load && Array.isArray(load.springs) ? { load: { springs: (load.springs as unknown[]).map(String).filter((x) => LOADS.has(x)).slice(0, 5) } } : {}),
+    ...(Array.isArray(i.props) && i.props.length ? { props: [...new Set(ids(i.props, 12))] } : {}),
   };
 }
 
@@ -75,6 +91,7 @@ export function cleanPlan(input: unknown, keepId = false): ClassPlan {
     createdAt: str(f.createdAt, 30) || nowIso(),
     updatedAt: str(f.updatedAt, 30) || nowIso(),
     ...(str(f.from, 80) ? { from: str(f.from, 80) } : {}),
+    ...(Array.isArray(f.extraProps) && f.extraProps.length ? { extraProps: named(f.extraProps, 'x_', 20) } : {}),
   };
 }
 
@@ -158,13 +175,13 @@ export function cleanSeries(input: unknown): Series | null {
 
 export const DEFAULT_PROPS: Record<string, number> = { long_box: 1, short_box: 1, magic_circle: 1, hand_weights: 1, small_ball: 1, loop_band: 1 };
 
-export function newStudio(name = 'My studio', brand = 'balanced_body'): Studio {
+/** A new studio starts blank: its reformers and springs, and a class set-up with only what the app can't work without. */
+export function newStudio(name = '', brand = 'balanced_body'): Studio {
   const b = (BRANDS as Record<string, { standard: Record<string, number> }>)[brand] ? brand : 'balanced_body';
-  return { id: uid('st'), name, hasReformers: true, brand: b, reformers: 8, springs: { ...(BRANDS as Record<string, { standard: Record<string, number> }>)[b].standard }, springOverrides: {}, props: { ...DEFAULT_PROPS }, classTypes: [], updatedAt: nowIso() };
+  return { id: uid('st'), name, hasReformers: true, brand: b, reformers: 0, springs: { ...(BRANDS as Record<string, { standard: Record<string, number> }>)[b].standard }, springOverrides: {}, props: {}, setup: blankSetup(), updatedAt: nowIso() };
 }
-
 /** A studio from anywhere, including a "room" from OpenPilates Server (with the server's prop counts). */
-export function cleanStudio(input: unknown, serverProps?: Record<string, unknown>): Studio {
+export function cleanStudio(input: unknown, serverProps?: Record<string, unknown>, setup?: unknown): Studio {
   const s = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   const brand = (BRANDS as Record<string, unknown>)[String(s.brand)] ? String(s.brand) : 'balanced_body';
   const springs: Record<string, number> = {};
@@ -185,25 +202,10 @@ export function cleanStudio(input: unknown, serverProps?: Record<string, unknown
     springs: Object.keys(springs).length || mat ? springs : { ...(BRANDS as Record<string, { standard: Record<string, number> }>)[brand].standard },
     springOverrides: overrides,
     props,
-    classTypes: list<unknown>(s.classTypes, 40).map(String).filter((x) => ID.test(x)),
+    setup: setup !== undefined ? cleanSetup(setup) : s.setup && typeof s.setup === 'object' ? cleanSetup(s.setup, true) : blankSetup(),
     updatedAt: str(s.updatedAt, 30) || nowIso(),
   };
 }
-
-const named = (v: unknown, prefix: string, max = 40): Named[] => {
-  const seen = new Set<string>();
-  const out: Named[] = [];
-  for (const x of list<Record<string, unknown>>(v, max)) {
-    const label = str(x && x.label, 40);
-    if (!label) continue;
-    let id = ID.test(String(x.id || '')) ? String(x.id) : prefix + slugify(label).replace(/-/g, '_');
-    while (seen.has(id)) id += '_2';
-    seen.add(id);
-    out.push({ id, label, ...(['lower', 'upper', 'core', 'stretch'].includes(String(x.group)) ? { group: String(x.group) } : {}) });
-  }
-  return out;
-};
-const ids = (v: unknown, max = 60) => list<unknown>(v, max).map(String).filter((x) => ID.test(x));
 
 export function defaultSetup(): Setup {
   const timingRows = (DEFAULT_TIMING_ROWS as TimingRow[]).map((r) => ({ ...r }));
@@ -221,10 +223,15 @@ export function defaultSetup(): Setup {
   };
 }
 
-/** Class set-up from anywhere, including the Studio page of OpenPilates Server (a pack's "studio"). */
-export function cleanSetup(input: unknown): Setup {
-  const s = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+/** Only what the app can't work without: the three core levels, the timing, the parts of the class, the muscles and one balance target. */
+export function blankSetup(): Setup {
   const d = defaultSetup();
+  return { ...d, levels: d.levels.filter((l) => (CORE_LEVELS as { id: string }[]).some((c) => c.id === l.id)), classTypes: [], lengths: [], focuses: d.focuses.filter((f) => f.id === 'full_body').slice(0, 1), targets: { general: d.targets.general } };
+}
+/** Class set-up from anywhere, including the Studio page of OpenPilates Server (a pack's "studio"). `blank`: empty lists stay empty (a studio's own set-up). */
+export function cleanSetup(input: unknown, blank = false): Setup {
+  const s = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const d = blank ? blankSetup() : defaultSetup();
   const levels = (withCoreLevels(list<Record<string, unknown>>(s.levels, 12).filter((l) => l && str(l.label, 40)).map((l) => ({
     id: ID.test(String(l.id || '')) ? String(l.id) : slugify(l.label).replace(/-/g, '_'), label: str(l.label, 40),
     from: Math.round(num(l.from, 1, 3, 1)), to: Math.round(num(l.to, 1, 3, 3)),
@@ -268,8 +275,8 @@ export function cleanSetup(input: unknown): Setup {
   for (const [k, v] of Object.entries((s.sectionMap || {}) as Record<string, unknown>)) if (ID.test(k) && ID.test(String(v))) sectionMap[k] = String(v);
   return {
     levels,
-    classTypes: classTypes.length ? classTypes : d.classTypes,
-    lengths: lengths.length ? lengths : d.lengths,
+    classTypes: classTypes.length || blank ? classTypes : d.classTypes,
+    lengths: lengths.length || blank ? lengths : d.lengths,
     defaultLength: Math.round(num(s.defaultLength, 10, 180, 50)),
     timingRows,
     timing: timingFromRows(timingRows) as Record<string, number>,
@@ -284,7 +291,7 @@ export function cleanSetup(input: unknown): Setup {
 
 export const ACCENTS = ['teal', 'navy', 'clay', 'plum', 'berry', 'olive', 'charcoal', 'own'] as const;
 export function defaultSettings(): Settings {
-  return { theme: 'auto', accent: 'teal', trueBlack: false, playDark: true, keepAwake: true, textSize: 'normal', autoBackup: true, keepBackups: 5, welcomed: false, deviceName: 'This device' };
+  return { theme: 'auto', accent: 'teal', trueBlack: true, playDark: true, keepAwake: true, textSize: 'normal', a11y: { bold: false, contrast: false, spacing: false, links: false, big: false, motion: false, slowMessages: false }, autoBackup: true, keepBackups: 5, welcomed: false, deviceName: 'This device' };
 }
 export function cleanSettings(input: unknown): Settings {
   const s = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
@@ -294,10 +301,11 @@ export function cleanSettings(input: unknown): Settings {
     theme: (['light', 'dark', 'auto'] as const).find((x) => x === s.theme) || d.theme,
     accent: (ACCENTS as readonly string[]).includes(String(s.accent)) && (s.accent !== 'own' || own) ? String(s.accent) : d.accent,
     ...(own ? { ownAccent: String(s.ownAccent) } : {}),
-    trueBlack: !!s.trueBlack,
+    trueBlack: s.trueBlack === undefined ? true : !!s.trueBlack,
     playDark: s.playDark === undefined ? d.playDark : !!s.playDark,
     keepAwake: s.keepAwake === undefined ? d.keepAwake : !!s.keepAwake,
     textSize: (['normal', 'large', 'larger'] as const).find((x) => x === s.textSize) || d.textSize,
+    a11y: Object.fromEntries(Object.keys(d.a11y).map((k) => [k, !!((s.a11y || {}) as Record<string, unknown>)[k]])) as Settings['a11y'],
     ...(ID.test(String(s.usualStudio || '')) ? { usualStudio: String(s.usualStudio) } : {}),
     autoBackup: s.autoBackup === undefined ? true : !!s.autoBackup,
     keepBackups: Math.round(num(s.keepBackups, 1, 30, 5)),
@@ -316,10 +324,10 @@ export function cleanTaught(v: unknown): Taught[] {
 }
 
 export function emptyData(): Data {
-  return { v: 1, settings: defaultSettings(), setup: defaultSetup(), studios: [], classes: [], taught: [], movements: {}, hidden: [], shown: [], series: [], hiddenSeries: [] };
+  return { v: 2, settings: defaultSettings(), studios: [], classes: [], taught: [], movements: {}, hidden: [], shown: [], series: [], hiddenSeries: [], notes: {} };
 }
 
-/** Everything the app keeps, read back from its own file or from a backup. */
+/** Everything the app keeps, read back from its own file or from a backup. Version 1 kept one class set-up for every studio: each studio gets its own copy. */
 export function cleanData(input: unknown): Data {
   const d = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   const movements: Record<string, Movement> = {};
@@ -327,11 +335,19 @@ export function cleanData(input: unknown): Data {
   const seenClass = new Set<string>();
   const classes = list<unknown>(d.classes, 5000).map((c) => cleanPlan(c, true)).filter((c) => (seenClass.has(c.id) ? false : (seenClass.add(c.id), true)));
   const seenStudio = new Set<string>();
-  const studios = list<unknown>(d.studios, 50).map((s) => cleanStudio(s)).filter((s) => (seenStudio.has(s.id) ? false : (seenStudio.add(s.id), true)));
+  const old = Number(d.v) < 2 ? cleanSetup(d.setup) : null;
+  const studios = list<Record<string, unknown>>(d.studios, 50).map((s) => {
+    if (!old || !s || typeof s !== 'object') return cleanStudio(s);
+    const taught = list<unknown>(s.classTypes, 40).map(String);
+    const setup = structuredClone(old);
+    if (taught.length) { const here = setup.classTypes.filter((c) => taught.includes(c.id)); if (here.length) setup.classTypes = here; }
+    return cleanStudio({ ...s, setup: undefined }, undefined, setup);
+  }).filter((s) => (seenStudio.has(s.id) ? false : (seenStudio.add(s.id), true)));
+  const notes: Record<string, string> = {};
+  for (const [k, v] of Object.entries((d.notes || {}) as Record<string, unknown>).slice(0, 3000)) if (slugify(k) && str(v, 2000)) notes[slugify(k)] = str(v, 2000);
   return {
-    v: 1,
+    v: 2,
     settings: cleanSettings(d.settings),
-    setup: cleanSetup(d.setup),
     studios, classes,
     taught: cleanTaught(d.taught),
     movements,
@@ -339,5 +355,6 @@ export function cleanData(input: unknown): Data {
     shown: list<unknown>(d.shown, 3000).map(slugify).filter(Boolean),
     series: list<unknown>(d.series, 500).map(cleanSeries).filter(Boolean) as Series[],
     hiddenSeries: list<unknown>(d.hiddenSeries, 500).map(slugify).filter(Boolean),
+    notes,
   };
 }

@@ -5,7 +5,7 @@ Class planning for mat and reformer Pilates instructors, on your iPhone or iPad.
 Plan a class block by block, see what it really does (time, spring changes, muscle balance, how the
 spine moves), then teach from it. Everything stays on your device. No account, no ads, no tracking.
 
-**Version 0.1.0 is the first build of the app. Expect rough edges, and keep backups.**
+**Version 0.2.0. Still early: keep backups.**
 
 - **iPhone and iPad**: one app for both. Install guide: [docs/IPHONE.md](docs/IPHONE.md).
 - **Android**: planned, not started.
@@ -27,7 +27,8 @@ spine moves), then teach from it. Everything stays on your device. No account, n
 - **Run sheet** to print or save.
 - **Sharing.** Send a class to another device on the same Wi-Fi by QR code, or as a file.
 - **Backups**, made about once a day when the app is opened, kept in the Files app.
-- **Look and colours**: light, dark, true black, seven colours or your own, three text sizes.
+- **Look and colours**: light, dark, true black, seven colours or your own.
+- **Accessibility**: text size, bold text, high contrast, reading spacing, bigger buttons, less motion.
 
 ### Coming later (shown greyed out in the app)
 

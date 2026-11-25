@@ -1,8 +1,8 @@
 // Everything the app knows, in memory, with one way to change it. Each change is written to the
 // device a moment later. Nothing here talks to a network.
 import { useSyncExternalStore } from 'react';
-import { analyze, applyStudioLists, flowTiming } from '../engine';
-import { cleanData, emptyData, nowIso, uid } from './clean';
+import { analyze, applyStudioLists, fitSprings, flowTiming } from '../engine';
+import { blankSetup, cleanData, emptyData, nowIso, uid } from './clean';
 import { LIBRARY, LIBRARY_SERIES } from './library';
 import { loadText, noteLoaded, saveText } from './storage';
 import type { ClassPlan, Data, Movement, Series, Setup, Studio } from './types';
@@ -16,7 +16,17 @@ let saveProblem = '';
 let appliedSetup: Setup | null = null;
 
 const notify = () => { version++; listeners.forEach((l) => l()); };
-const followSetup = () => { if (appliedSetup !== data.setup) { applyStudioLists(data.setup); appliedSetup = data.setup; cache = null; } };
+/**
+ * The engine keeps its lists (levels, focuses, muscles, props, parts of the class, timing) in one
+ * place, so they are switched to the studio being looked at before anything reads them. Each
+ * screen does this for its studio as it draws (useStudio in the UI).
+ */
+export function applySetup(setup: Setup): void {
+  if (appliedSetup === setup) return;
+  applyStudioLists(setup);
+  appliedSetup = setup;
+}
+const followSetup = () => { const s = studioOf(data.settings.usualStudio); applySetup(s.setup); };
 
 export const getData = () => data;
 export const isReady = () => ready;
@@ -92,17 +102,44 @@ export const isLibrary = (slug: string) => LIBRARY.some((m) => m.slug === slug);
 export const libraryVersion = (slug: string) => LIBRARY.find((m) => m.slug === slug);
 
 // ---- studios
-export const NO_STUDIO: Studio = { id: '', name: 'No studio yet', hasReformers: true, brand: 'balanced_body', reformers: 0, springs: {}, springOverrides: {}, props: {}, classTypes: [], updatedAt: '' };
+export const NO_STUDIO: Studio = { id: '', name: 'No studio yet', hasReformers: true, brand: 'balanced_body', reformers: 0, springs: {}, springOverrides: {}, props: {}, setup: blankSetup(), updatedAt: '' };
 export function studioOf(id?: string): Studio {
   return data.studios.find((s) => s.id === id) || data.studios.find((s) => s.id === data.settings.usualStudio) || data.studios[0] || NO_STUDIO;
 }
 export const usualStudio = () => studioOf(data.settings.usualStudio);
 /** What the engine calls a room: the springs a studio's reformers have. */
 export const roomOf = (s: Studio) => ({ id: s.id, name: s.name, brand: s.brand, springs: s.springs, springOverrides: s.springOverrides });
-/** The studio settings the engine's checks read: this studio's props, with the shared class set-up. */
-export const engineStudio = (s: Studio) => ({ props: s.props, targets: data.setup.targets, timing: data.setup.timing, classTypes: data.setup.classTypes, timingRows: data.setup.timingRows });
-export const timingFor = (plan: ClassPlan) => flowTiming({ timing: data.setup.timing, classTypes: data.setup.classTypes }, plan) as Record<string, number>;
-export const analyse = (plan: ClassPlan, studio: Studio) => analyze({ flow: plan, movements: library().map, studio: engineStudio(studio), clients: [] });
+/** The studio settings the engine's checks read: this studio's props and class set-up. */
+export const engineStudio = (s: Studio) => ({ props: s.props, targets: s.setup.targets, timing: s.setup.timing, classTypes: s.setup.classTypes, timingRows: s.setup.timingRows });
+export const timingFor = (plan: ClassPlan, studio = studioOf(plan.studioId)) => flowTiming({ timing: studio.setup.timing, classTypes: studio.setup.classTypes }, plan) as Record<string, number>;
+
+/**
+ * The library as one studio's reformers see it: every spring setting moved to the nearest spring
+ * the studio has. The checks, drafts, spring changes and Play all work from this, so what they
+ * count is what the instructor will actually change at that studio.
+ */
+const fittedCache = new WeakMap<Studio, { lib: Lib; map: Record<string, Movement> }>();
+export function fittedLibrary(studio: Studio): Record<string, Movement> {
+  const lib = library();
+  const had = fittedCache.get(studio);
+  if (had && had.lib === lib) return had.map;
+  const fit = (l?: string[]) => (l && l.length ? (fitSprings(l, studio) as { loads: string[] }).loads : l);
+  const map: Record<string, Movement> = {};
+  for (const [slug, m] of Object.entries(lib.map)) {
+    if (m.apparatus !== 'reformer' || !m.load || !studio.id || !studio.hasReformers) { map[slug] = m; continue; }
+    map[slug] = { ...m, load: { ...m.load, springs: fit(m.load.springs), ...(m.load.advance ? { advance: fit(m.load.advance) } : {}) },
+      ...(m.variations ? { variations: m.variations.map((v) => (v && typeof v === 'object' && Array.isArray(v.springs) ? { ...v, springs: fit(v.springs as string[]) } : v)) } : {}) };
+  }
+  fittedCache.set(studio, { lib, map });
+  return map;
+}
+/** A class's own spring settings moved to what the studio has, too. */
+export function fittedPlan(plan: ClassPlan, studio: Studio): ClassPlan {
+  if (!studio.id || !studio.hasReformers) return plan;
+  const fit = (l: string[]) => (fitSprings(l, studio) as { loads: string[] }).loads;
+  return { ...plan, segments: plan.segments.map((s) => ({ ...s, items: s.items.map((i) => (i.load?.springs?.length ? { ...i, load: { springs: fit(i.load.springs) } } : i)) })) };
+}
+export const analyse = (plan: ClassPlan, studio: Studio) => { applySetup(studio.setup); return analyze({ flow: fittedPlan(plan, studio), movements: fittedLibrary(studio), studio: engineStudio(studio), clients: [] }); };
 
 // ---- classes
 export function saveClass(plan: ClassPlan): void {
@@ -139,7 +176,16 @@ export function removeStudio(id: string): void {
   });
 }
 export const setSettings = (patch: Partial<Data['settings']>) => update((d) => { d.settings = { ...d.settings, ...patch }; });
-export const setSetup = (fn: (s: Setup) => Setup) => update((d) => { d.setup = fn(d.setup); });
+/** Change one studio's class set-up straight away (adding a prop or focus from inside a class, when asked to). */
+export function changeStudio(id: string, fn: (s: Studio) => void): void {
+  const s = data.studios.find((x) => x.id === id);
+  if (!s) return;
+  const next = structuredClone(s);
+  fn(next);
+  saveStudio(next);
+}
+export const noteOf = (slug: string) => data.notes[slug] || '';
+export function setNote(slug: string, text: string): void { update((d) => { const n = { ...d.notes }; if (text.trim()) n[slug] = text.slice(0, 2000); else delete n[slug]; d.notes = n; }); }
 
 export function saveMovement(mv: Movement): void { update((d) => { d.movements = { ...d.movements, [mv.slug]: { ...mv, source: 'mine' } }; }); }
 /** Puts a changed built-in movement back to how it ships, or deletes one made on this device. */

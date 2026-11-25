@@ -1,12 +1,14 @@
 // Building a class: its phases and blocks, the settings along the top, and the checks.
 import { useMemo, useState } from 'react';
-import { CLASS_LEVELS, FINISHERS, FOCUSES, MUSCLES, OPTION_KINDS, SEGMENT_ROLES, fillPhase, itemDuration, kindOf, labelOf, layersOf, levelRange, classLevel, namesOf, sectionOf, SECTIONS, tidySprings, timedLinesOf, variationsOf } from '../../engine';
-import { cleanSegments, uid } from '../../lib/clean';
-import { blockCount, canRedo, canUndo, changeClass, findItem, levelName, nudge, redoClass, undoClass } from '../../lib/plan';
-import { analyse, duplicateClass, getData, library, removeClass, saveSeries, studioOf, timingFor, useData } from '../../lib/store';
+import { CLASS_LEVELS, FINISHERS, FOCUSES, MUSCLES, SPINE, fitSprings, OPTION_KINDS, SEGMENT_ROLES, fillPhase, itemDuration, kindOf, labelOf, layersOf, levelRange, classLevel, namesOf, sectionOf, SECTIONS, tidySprings, timedLinesOf, variationsOf } from '../../engine';
+import { cleanSegments, slugify, uid } from '../../lib/clean';
+import { blockCount, propsTally, canRedo, canUndo, changeClass, classDirty, classKey, findItem, levelName, nudge, openClass, planOf, redoClass, saveOpenClass, undoClass } from '../../lib/plan';
+import { closeDraft, hasDraft, useDrafts } from '../../lib/drafts';
+import { analyse, applySetup, changeStudio, classOf, duplicateClass, fittedLibrary, fittedPlan, library, removeClass, saveSeries, studioOf, timingFor, useData } from '../../lib/store';
 import type { ClassPlan, Item, Movement, Segment, Studio } from '../../lib/types';
-import { Back, Chips, ClockInput, Empty, Field, Icon, Row, Screen, Sheet, Springs, Switch, Thumb, confirmAsk, fmtClock, toast } from '../bits';
-import { nav } from '../nav';
+import { Back, Chips, ClockInput, Empty, Field, Icon, Row, SaveButton, Screen, Sheet, Springs, Switch, Thumb, chooseAsk, confirmAsk, fmtClock, toast, useEditing } from '../bits';
+import { addStudio } from './Studios';
+import { nav, viewState } from '../nav';
 import { roleColor, when } from './Classes';
 import { startPlay } from './Play';
 
@@ -18,21 +20,39 @@ export const loadsOf = (item: Item, mv?: Movement): string[] | undefined => {
   return v?.springs?.length ? v.springs : mv?.load?.springs;
 };
 
+/** The class as it is being edited (opened for editing on first look). */
 function useClass(id: string): ClassPlan | undefined {
-  const d = useData();
-  return d.classes.find((c) => c.id === id);
+  useData();
+  useDrafts();
+  return planOf(id) ? (hasDraft(classKey(id)) ? planOf(id) : openClass(id)) : undefined;
 }
-
+/** Play and Share work from the saved class, so unsaved changes are saved first (or the person stays). */
+export async function savedFirst(id: string, doing: string): Promise<boolean> {
+  if (!classDirty(id)) return true;
+  const a = await chooseAsk('Save the class first?', `It has changes that are not saved. ${doing} uses the saved class.`, [{ id: 'save', label: `Save and ${doing.toLowerCase()}`, kind: 'p' }]);
+  if (a !== 'save') return false;
+  saveOpenClass(id);
+  return true;
+}
 export function BuilderScreen({ id }: { id: string }) {
   const plan = useClass(id);
   const d = useData();
-  const [sheet, setSheet] = useState<null | { kind: 'more' } | { kind: 'studio' } | { kind: 'pick'; seg: string } | { kind: 'phase'; seg: string } | { kind: 'line'; seg: string }>(null);
+  const [sheet, setSheet] = useState<null | { kind: 'more' } | { kind: 'studio' } | { kind: 'props' } | { kind: 'pick'; seg: string } | { kind: 'phase'; seg: string } | { kind: 'line'; seg: string }>(null);
+  const dirty = useEditing(classKey(id), 'this class', () => saveOpenClass(id));
   const studio = studioOf(plan?.studioId);
+  applySetup(studio.setup);
   const a = useMemo(() => (plan ? (analyse(plan, studio) as Analysis) : null), [plan, studio]);
   if (!plan || !a) return <Screen top={<><Back label="Classes" /><h1>Class not found</h1></>}><Empty title="This class is no longer here" /></Screen>;
+  const isNew = !d.classes.some((c) => c.id === id);
+  const tally = propsTally(plan);
+  const short = tally.filter((x) => !(Number(studio.props[x.id]) > 0));
   const tm = timingFor(plan);
   const lib = library().map;
   const change = (fn: (p: ClassPlan) => void, typing = false) => changeClass(id, fn, typing);
+  const remove = async () => {
+    if (isNew) { if (await confirmAsk('Throw this class away?', "It hasn't been saved.", 'Throw away', true)) { closeDraft(classKey(id)); nav.backNow(); } return; }
+    if (await confirmAsk('Delete this class?', `"${plan.title}" will be removed from this device. Its entries in your taught log stay.`, 'Delete', true)) { closeDraft(classKey(id)); removeClass(id); nav.backNow(); toast('Class deleted.'); }
+  };
   const planOf = new Map<string, { loads: string[]; changed: boolean }>((a.springPlan as { itemId: string; pass: number; loads: string[]; changed: boolean }[]).filter((p) => p.pass === 1).map((p) => [p.itemId, p]));
   const isPhased = !plan.noPhases;
   const warn = (a.checks as { level: string }[]).filter((c) => c.level === 'warn').length;
@@ -42,9 +62,9 @@ export function BuilderScreen({ id }: { id: string }) {
   const over = Math.abs(totalMin - plan.lengthMin) > 3;
 
   const suggest = (seg: Segment) => {
-    const ct = d.setup.classTypes.find((c) => c.id === plan.classType);
+    const ct = studio.setup.classTypes.find((c) => c.id === plan.classType);
     const phase = ct?.phases.find((p) => p.name === seg.name);
-    const items = cleanSegments([{ id: 'x', name: 'x', items: fillPhase({ movements: lib, flow: plan, seg, phase, props: studio.props, timing: tm as never, count: seg.items.length ? 1 : undefined }) }])[0]?.items || [];
+    const items = cleanSegments([{ id: 'x', name: 'x', items: fillPhase({ movements: fittedLibrary(studio), flow: plan, seg, phase, props: studio.props, timing: tm as never, count: seg.items.length ? 1 : undefined }) }])[0]?.items || [];
     if (!items.length) { toast('Nothing left to suggest for this phase.'); return; }
     change((p) => { const s = p.segments.find((x) => x.id === seg.id); if (s) s.items.push(...items); });
     toast(`Added ${items.map((i) => lib[i.slug!]?.name).join(', ')}.`, { label: 'Undo', run: () => undoClass(id) });
@@ -75,7 +95,8 @@ export function BuilderScreen({ id }: { id: string }) {
               const mv = lib[item.slug!];
               const p = planOf.get(item.id);
               const layers = layersOf(mv, item) as { title: string }[];
-              const missing = mv ? (mv.equipment || []).filter((e) => !(Number(studio.props[e]) > 0)) : [];
+              const missing = mv ? [...new Set([...(mv.equipment || []), ...(item.props || [])])].filter((e) => !(Number(studio.props[e]) > 0)) : [];
+              const added = (item.props || []).map((e) => (plan.extraProps || []).find((x) => x.id === e)?.label || labelOf(EQUIPMENT_SAFE(), e));
               return (
                 <div className="stack-sm" key={item.id}>
                   {p?.changed && plan.apparatus !== 'mat' ? <div className="change">CHANGE SPRINGS <Springs loads={p.loads} studio={studio} /></div> : null}
@@ -86,12 +107,13 @@ export function BuilderScreen({ id }: { id: string }) {
                         <div className="m">{mv ? [labelOf(POSITIONS_SAFE, mv.position), item.reps || mv.reps].filter(Boolean).join(' · ') : 'Not in your library any more'}</div></div>
                       <div style={{ textAlign: 'right', flex: 'none' }}>{mv?.apparatus === 'reformer' ? <Springs loads={p?.loads || loadsOf(item, mv)} studio={studio} label={false} /> : null}<div className="m">{fmtClock(itemDuration(item, mv, tm) as number)}</div></div>
                     </div>
-                    {layers.length || item.finisher || item.note || missing.length ? (
+                    {layers.length || item.finisher || item.note || missing.length || added.length ? (
                       <div className="extra">
                         {layers.map((l, i) => <div key={i}>{i + 1} · {l.title}</div>)}
                         {item.finisher ? <div className="m">Finish: {item.finisher}</div> : null}
                         {item.note ? <div className="m" style={{ fontStyle: 'italic' }}>{item.note}</div> : null}
-                        {missing.length ? <div className="warn-text" style={{ fontWeight: 600 }}>{studio.name} has no {missing.map((e) => labelOf(EQUIPMENT_SAFE(), e).toLowerCase()).join(' or ')}</div> : null}
+                        {added.length ? <div className="m">With {added.join(', ').toLowerCase()}</div> : null}
+                        {missing.length && studio.id ? <div className="warn-text" style={{ fontWeight: 600 }}>{studio.name} has no {missing.map((e) => ((plan.extraProps || []).find((x) => x.id === e)?.label || labelOf(EQUIPMENT_SAFE(), e)).toLowerCase()).join(' or ')}</div> : null}
                       </div>
                     ) : null}
                   </button>
@@ -117,14 +139,15 @@ export function BuilderScreen({ id }: { id: string }) {
         <div className="row between">
           <Back label="Classes" />
           <div className="row" style={{ gap: 6 }}>
-            <span className="m" aria-live="polite">Saved</span>
+            <button type="button" className="btn icon ghost" aria-label={isNew ? 'Throw this class away' : 'Delete this class'} onClick={() => void remove()}><Icon name="trash" size={18} /></button>
             <button type="button" className="btn icon" aria-label="Undo" disabled={!canUndo(id)} onClick={() => undoClass(id)}><Icon name="undo" size={18} /></button>
             <button type="button" className="btn icon" aria-label="Redo" disabled={!canRedo(id)} onClick={() => redoClass(id)}><Icon name="redo" size={18} /></button>
+            <SaveButton dirty={dirty} onSave={() => { saveOpenClass(id); toast('Class saved.'); }} />
           </div>
         </div>
         <input className="title" type="text" aria-label="Class name" value={plan.title} maxLength={120} onChange={(e) => change((p) => { p.title = e.target.value; }, true)} />
+        <button type="button" className="built-for" onClick={() => setSheet({ kind: 'studio' })}><span className="m">Built for</span> <b>{studio.id ? studio.name : 'no studio yet'}</b><span className="link">Change</span></button>
         <div className="chips scroll" style={{ marginTop: 6 }}>
-          <button type="button" className="chip on" onClick={() => setSheet({ kind: 'studio' })}>{studio.id ? studio.name : 'Add a studio'}</button>
           <button type="button" className="chip" onClick={() => setSheet({ kind: 'more' })}>{plan.lengthMin} min</button>
           <button type="button" className="chip" onClick={() => setSheet({ kind: 'more' })}>{levelName(plan.level)}</button>
           {plan.when ? <button type="button" className="chip" onClick={() => setSheet({ kind: 'more' })}>{when(plan.when)}</button> : null}
@@ -136,6 +159,11 @@ export function BuilderScreen({ id }: { id: string }) {
           <button type="button" className={`stat${limit && a.springChanges > limit ? ' bad' : ''}`} onClick={() => nav.go({ name: 'analysis', id })}><b>{plan.apparatus === 'mat' ? '–' : limit ? `${a.springChanges} / ${limit}` : a.springChanges}</b><span>Spring changes</span></button>
           <button type="button" className={`stat${warn ? ' bad' : ''}`} onClick={() => nav.go({ name: 'analysis', id })}><b>{warn}</b><span>To check</span></button>
         </div>
+        <button type="button" className={`props-bar${short.length && studio.id ? ' bad' : ''}`} onClick={() => setSheet({ kind: 'props' })} aria-label="Props this class uses">
+          <span className="lab" style={{ padding: 0 }}>Props</span>
+          {tally.length ? tally.slice(0, 6).map((x) => <span className={`tag${!(Number(studio.props[x.id]) > 0) && studio.id ? ' warn' : ''}`} key={x.id}>{x.label} ×{x.blocks}</span>) : <span className="m">None yet</span>}
+          {tally.length > 6 ? <span className="tag">+{tally.length - 6}</span> : null}
+        </button>
       </div>
       <div className="body">
         <div className="two">
@@ -145,21 +173,23 @@ export function BuilderScreen({ id }: { id: string }) {
       </div>
       <div className="foot">
         <button type="button" className="btn p grow" onClick={() => setSheet({ kind: 'pick', seg: lastSeg.id })}><Icon name="plus" size={18} />Add a block</button>
-        <button type="button" className="btn" onClick={() => nav.go({ name: 'share', classId: id })} aria-label="Share this class"><Icon name="share" size={18} /></button>
-        <button type="button" className="btn dark" onClick={() => startPlay(plan)}><Icon name="play" size={16} fill />Play</button>
+        <button type="button" className="btn" onClick={async () => { if (await savedFirst(id, 'Share')) nav.go({ name: 'share', classId: id }); }} aria-label="Share this class"><Icon name="share" size={18} /></button>
+        <button type="button" className="btn dark" onClick={async () => { if (await savedFirst(id, 'Play')) startPlay(classOf(id) || plan); }}><Icon name="play" size={16} fill />Play</button>
       </div>
 
       {sheet?.kind === 'studio' ? (
-        <Sheet title="Which studio is this for?" onClose={() => setSheet(null)}>
-          <p className="m">Springs and props on this class follow the studio. Nothing in the plan changes.</p>
-          {d.studios.map((s) => <button type="button" key={s.id} className={`card pick${s.id === studio.id ? ' on' : ''}`} onClick={() => { change((p) => { p.studioId = s.id; }); setSheet(null); }}><b>{s.name}</b><div className="m">{studioLine(s)}</div></button>)}
-          <button type="button" className="btn" onClick={() => { setSheet(null); nav.go({ name: 'studios' }, 'more'); }}>Manage my studios</button>
+        <Sheet title="Which studio is this class for?" onClose={() => setSheet(null)}>
+          <p className="m">The class moves to that studio: its springs show as that studio's reformers, its props are checked against what that studio owns, and its class set-up applies. The blocks stay as they are. To keep this one too, Duplicate it first.</p>
+          {d.studios.map((s) => { const miss = propsTally(plan).filter((x) => !(Number(s.props[x.id]) > 0)); return <button type="button" key={s.id} className={`card pick${s.id === studio.id ? ' on' : ''}`} onClick={() => { change((p) => { p.studioId = s.id; if (!s.hasReformers && p.apparatus !== 'mat') p.apparatus = 'mat'; }); setSheet(null); toast(`Now built for ${s.name}. Save to keep it.`); }}><b>{s.name}</b><div className="m">{studioLine(s)}</div>{miss.length ? <div className="warn-text tiny">Has no {miss.map((x) => x.label.toLowerCase()).join(', ')}</div> : null}</button>; })}
+          {!d.studios.length ? <p className="m">You have no studios yet.</p> : null}
+          <button type="button" className="btn" onClick={() => { setSheet(null); addStudio(); }}>Add a studio</button>
         </Sheet>
       ) : null}
+      {sheet?.kind === 'props' ? <PropsSheet plan={plan} studio={studio} onClose={() => setSheet(null)} /> : null}
       {sheet?.kind === 'more' ? <MoreSheet plan={plan} change={change} onClose={() => setSheet(null)} /> : null}
       {sheet?.kind === 'pick' ? <PickSheet plan={plan} segId={sheet.seg} studio={studio} onClose={() => setSheet(null)} /> : null}
       {sheet?.kind === 'phase' ? <PhaseSheet plan={plan} segId={sheet.seg} change={change} onClose={() => setSheet(null)} /> : null}
-      {sheet?.kind === 'line' ? <LineSheet segId={sheet.seg} change={change} onClose={() => setSheet(null)} /> : null}
+      {sheet?.kind === 'line' ? <LineSheet planId={id} segId={sheet.seg} change={change} onClose={() => setSheet(null)} /> : null}
     </div>
   );
 }
@@ -173,8 +203,11 @@ import { BRANDS } from '../../engine';
 const BRAND_LIST = () => Object.entries(BRANDS as Record<string, { label: string }>).map(([id, b]) => ({ id, label: b.label }));
 
 function MoreSheet({ plan, change, onClose }: { plan: ClassPlan; change: (fn: (p: ClassPlan) => void, typing?: boolean) => void; onClose: () => void }) {
-  const d = useData();
+  useData();
+  const st = studioOf(plan.studioId);
+  const d = { setup: st.setup };
   const lengths = [...new Set([...d.setup.lengths, plan.lengthMin])].sort((x, y) => x - y);
+  const isNew = !classOf(plan.id);
   const levels = (CLASS_LEVELS as { id: string; label: string }[]).some((l) => l.id === plan.level) ? (CLASS_LEVELS as { id: string; label: string }[]) : [...(CLASS_LEVELS as { id: string; label: string }[]), classLevel(plan.level) as { id: string; label: string }];
   const focuses = FOCUSES as { id: string; label: string }[];
   const limit = Number(plan.springBudget) > 0 ? Number(plan.springBudget) : 0;
@@ -206,11 +239,11 @@ function MoreSheet({ plan, change, onClose }: { plan: ClassPlan; change: (fn: (p
       {plan.apparatus !== 'mat' ? <Field label="Spring changes, at most"><select value={limit} onChange={(e) => change((p) => { p.springBudget = Number(e.target.value); })}>{[...new Set([0, 1, 2, 3, 4, 5, 6, 8, 10, limit])].sort((x, y) => x - y).map((n) => <option key={n} value={n}>{n ? `Up to ${n}` : 'No limit'}</option>)}</select></Field> : null}
       <div className="card flush">
         <Row title="Planned in phases" sub="Optional, but recommended: phases help plan the class the way clients expect it." right={<Switch on={!plan.noPhases} onChange={(on) => void togglePhases(on)} label="Planned in phases" />} />
-        {plan.apparatus !== 'mat' ? <Row icon="spark" title="Tidy springs" sub="Reorders blocks inside each phase so shared settings sit together" onClick={() => { change((p) => { p.segments = cleanSegments(tidySprings(p, library().map)); }); toast('Springs tidied.', { label: 'Undo', run: () => undoClass(plan.id) }); onClose(); }} /> : null}
+        {plan.apparatus !== 'mat' ? <Row icon="spark" title="Tidy springs" sub="Reorders blocks inside each phase so shared settings sit together" onClick={() => { change((p) => { p.segments = cleanSegments(tidySprings(fittedPlan(p, st), fittedLibrary(st))); }); toast('Springs tidied.', { label: 'Undo', run: () => undoClass(plan.id) }); onClose(); }} /> : null}
         <Row icon="list" title="Run sheet" sub="The whole class on one page" onClick={() => { onClose(); nav.go({ name: 'sheet', id: plan.id }); }} />
-        <Row icon="share" title="Share this class" sub="QR code over Wi-Fi, or a file" onClick={() => { onClose(); nav.go({ name: 'share', classId: plan.id }); }} />
-        <Row icon="copy" title="Duplicate" onClick={() => { const c = duplicateClass(plan.id); onClose(); if (c) { nav.swap({ name: 'class', id: c.id }); toast('Duplicated. This is the copy.'); } }} />
-        <Row icon="trash" danger title="Delete this class" onClick={async () => { if (await confirmAsk('Delete this class?', `"${plan.title}" will be removed from this device. Its entries in your taught log stay.`, 'Delete', true)) { onClose(); nav.back(); removeClass(plan.id); } }} />
+        <Row icon="share" title="Share this class" sub="QR code over Wi-Fi, or a file" onClick={async () => { if (!(await savedFirst(plan.id, 'Share'))) return; onClose(); nav.go({ name: 'share', classId: plan.id }); }} />
+        <Row icon="copy" title="Duplicate" sub={isNew ? 'Save the class first' : undefined} onClick={isNew ? undefined : async () => { if (!(await savedFirst(plan.id, 'Duplicate'))) return; const c = duplicateClass(plan.id); onClose(); if (c) { closeDraft(classKey(plan.id)); nav.swap({ name: 'class', id: c.id }); toast('Duplicated. This is the copy.'); } }} />
+        <Row icon="trash" danger title={isNew ? 'Throw this class away' : 'Delete this class'} onClick={async () => { if (isNew) { if (await confirmAsk('Throw this class away?', "It hasn't been saved.", 'Throw away', true)) { onClose(); closeDraft(classKey(plan.id)); nav.backNow(); } return; } if (await confirmAsk('Delete this class?', `"${plan.title}" will be removed from this device. Its entries in your taught log stay.`, 'Delete', true)) { onClose(); closeDraft(classKey(plan.id)); removeClass(plan.id); nav.backNow(); } }} />
       </div>
       <Field label="Notes for yourself"><textarea value={plan.notes || ''} maxLength={2000} onChange={(e) => change((p) => { if (e.target.value) p.notes = e.target.value; else delete p.notes; }, true)} /></Field>
     </Sheet>
@@ -240,8 +273,8 @@ function PhaseSheet({ plan, segId, change, onClose }: { plan: ClassPlan; segId: 
   );
 }
 
-function LineSheet({ segId, change, onClose }: { segId: string; change: (fn: (p: ClassPlan) => void) => void; onClose: () => void }) {
-  const mine = timedLinesOf(getData().setup) as { id: string; label: string; note?: string; seconds: number }[];
+function LineSheet({ planId, segId, change, onClose }: { planId: string; segId: string; change: (fn: (p: ClassPlan) => void) => void; onClose: () => void }) {
+  const mine = timedLinesOf(studioOf(planOf(planId)?.studioId).setup) as { id: string; label: string; note?: string; seconds: number }[];
   const [name, setName] = useState('');
   const [secs, setSecs] = useState(60);
   const put = (label: string, seconds: number, note?: string) => { change((p) => { const s = p.segments.find((x) => x.id === segId); if (s) s.items.push({ id: uid('i'), pause: true, label, duration: Math.min(3600, Math.max(5, seconds)), ...(note ? { note } : {}) }); }); onClose(); toast(`Added ${label}.`); };
@@ -251,7 +284,7 @@ function LineSheet({ segId, change, onClose }: { segId: string; change: (fn: (p:
       {mine.length ? <div className="card flush">{mine.map((r) => <Row key={r.id} icon="clock" title={r.label} sub={r.note} right={<span className="m">{fmtClock(r.seconds || 60)}</span>} onClick={() => put(r.label, Number(r.seconds) || 60, r.note)} />)}</div> : null}
       <div className="lab">{mine.length ? 'Or your own' : 'What is it?'}</div>
       <div className="row"><input type="text" maxLength={60} placeholder="e.g. Water break" aria-label="Name of the timed line" value={name} onChange={(e) => setName(e.target.value)} /><ClockInput seconds={secs} onChange={setSecs} label="Time, minutes:seconds" min={5} max={3600} /></div>
-      {!mine.length ? <p className="tiny">Keep your usual ones in More → Class set-up → Timing, so they are one tap away here.</p> : null}
+      {!mine.length ? <p className="tiny">Keep your usual ones in the studio's Class set-up → Lengths and timing, so they are one tap away here.</p> : null}
     </Sheet>
   );
 }
@@ -259,20 +292,30 @@ function LineSheet({ segId, change, onClose }: { segId: string; change: (fn: (p:
 function PickSheet({ plan, segId, studio, onClose }: { plan: ClassPlan; segId: string; studio: Studio; onClose: () => void }) {
   const [q, setQ] = useState('');
   const [tab, setTab] = useState<'movements' | 'series'>('movements');
-  const [section, setSection] = useState('');
+  const f = viewState('pick-filters', { section: '', position: '', spine: '', muscle: '', open: false });
+  const [section, setSectionState] = useState(f.section);
+  const [position, setPosition] = useState(f.position);
+  const [spine, setSpine] = useState(f.spine);
+  const [muscle, setMuscle] = useState(f.muscle);
+  const [open, setOpen] = useState(f.open);
+  const setSection = (v: string) => { f.section = v; setSectionState(v); };
+  const filters = [position, spine, muscle].filter(Boolean).length;
   const [onlyKit, setOnlyKit] = useState(true);
   const [added, setAdded] = useState(0);
   const lib = library();
   const seg = plan.segments.find((s) => s.id === segId);
   const used = new Set(plan.segments.flatMap((s) => s.items.map((i) => i.slug)));
   const lv = classLevel(plan.level) as { to: number };
-  const ct = getData().setup.classTypes.find((c) => c.id === plan.classType);
+  const ct = studio.setup.classTypes.find((c) => c.id === plan.classType);
   const phase = ct?.phases.find((p) => p.name === seg?.name);
   const app = plan.apparatus === 'mixed' ? null : plan.apparatus;
   const text = q.trim().toLowerCase();
   const list = lib.list.filter((m) => (!app || m.apparatus === app)
     && (!text || (namesOf(m) as string[]).some((n) => n.toLowerCase().includes(text)) || [...(m.muscles?.primary || [])].some((x) => labelOf(MUSCLES, x).toLowerCase().includes(text)))
     && (!section || sectionOf(m) === section)
+    && (!position || m.position === position)
+    && (!spine || (m.spine || []).includes(spine))
+    && (!muscle || [...(m.muscles?.primary || []), ...(m.muscles?.secondary || [])].includes(muscle))
     && (!onlyKit || (m.equipment || []).every((e) => Number(studio.props[e]) > 0))
     && (text ? true : (levelRange(m) as number[])[0] <= lv.to))
     .sort((x, y) => Number(used.has(x.slug)) - Number(used.has(y.slug)) || (phase && !text && !section ? Number(!(phase.sections || []).includes(sectionOf(x))) - Number(!(phase.sections || []).includes(sectionOf(y))) : 0) || x.name.localeCompare(y.name));
@@ -285,6 +328,13 @@ function PickSheet({ plan, segId, studio, onClose }: { plan: ClassPlan; segId: s
         {tab === 'movements' && studio.id ? <label className="row tiny" style={{ gap: 6 }}>Only our kit<Switch on={onlyKit} onChange={setOnlyKit} label="Only what this studio has the kit for" /></label> : null}</div>
       {tab === 'movements' ? <>
         <Chips scroll options={[{ id: '', label: 'All parts' }, ...(SECTIONS as { id: string; label: string }[]).map((s) => ({ id: s.id, label: s.label }))]} value={section} onPick={setSection} />
+        <button type="button" className="row between filters-toggle" aria-expanded={open} onClick={() => { f.open = !open; setOpen(!open); }}><span><b>Filters</b>{filters ? <span className="tag acc" style={{ marginLeft: 8 }}>{filters} on</span> : null}</span><Icon name={open ? 'up' : 'down'} size={18} /></button>
+        {open ? <div className="stack-sm">
+          <div className="row"><Field label="Position"><select value={position} onChange={(e) => { f.position = e.target.value; setPosition(e.target.value); }}><option value="">Any</option>{POSITIONS_SAFE.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}</select></Field>
+            <Field label="Spine"><select value={spine} onChange={(e) => { f.spine = e.target.value; setSpine(e.target.value); }}><option value="">Any</option>{(SPINE as { id: string; label: string }[]).map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}</select></Field></div>
+          <Field label="Muscle"><select value={muscle} onChange={(e) => { f.muscle = e.target.value; setMuscle(e.target.value); }}><option value="">Any</option>{(MUSCLES as { id: string; label: string }[]).map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}</select></Field>
+          {filters ? <button type="button" className="link" style={{ alignSelf: 'flex-start' }} onClick={() => { f.position = ''; f.spine = ''; f.muscle = ''; setPosition(''); setSpine(''); setMuscle(''); }}>Clear filters</button> : null}
+        </div> : null}
         <div className="tiny">{list.length} movement{list.length === 1 ? '' : 's'}{!text ? ` at ${levelName(plan.level)} or below` : ''}{phase && !text && !section ? `, ${seg?.name} first` : ''}</div>
         <div className="card flush">
           {list.slice(0, 80).map((m) => (
@@ -307,13 +357,33 @@ function PickSheet({ plan, segId, studio, onClose }: { plan: ClassPlan; segId: s
   );
 }
 
+function PropsSheet({ plan, studio, onClose }: { plan: ClassPlan; studio: Studio; onClose: () => void }) {
+  useData();
+  const tally = propsTally(plan);
+  return (
+    <Sheet title="Props in this class" onClose={onClose} foot={<button type="button" className="btn p grow" onClick={onClose}>Done</button>}>
+      <p className="m">What the movements need, plus what you added to blocks. Add a prop to a block by tapping the block.</p>
+      {!tally.length ? <Empty title="No props yet" text="Movements that need a prop add it here by themselves." /> : (
+        <div className="card flush">{tally.map((x) => { const own = Number(studio.props[x.id]) || 0; return (
+          <div className="set" key={x.id}><span className="grow"><b>{x.label}</b><div className="m">In {x.blocks} block{x.blocks === 1 ? '' : 's'}{studio.id ? (own ? ` · ${studio.name} has ${own}` : ` · ${studio.name} has none`) : ''}</div></span>
+            {studio.id && !own ? <button type="button" className="btn sm" onClick={() => { const custom = (plan.extraProps || []).find((e) => e.id === x.id); changeStudio(studio.id, (s) => { if (custom && !s.setup.customProps.some((c) => c.id === x.id)) s.setup.customProps = [...s.setup.customProps, custom]; s.props = { ...s.props, [x.id]: 1 }; }); toast(`${studio.name} now has ${x.label.toLowerCase()}. Change how many in My studios.`); }}>We have it</button> : null}</div>
+        ); })}</div>
+      )}
+    </Sheet>
+  );
+}
+
 // ---- one block
 export function BlockScreen({ id, itemId }: { id: string; itemId: string }) {
   const plan = useClass(id);
   const at = plan ? findItem(plan, itemId) : undefined;
   const [layerText, setLayerText] = useState('');
   const [offer, setOffer] = useState('');
+  const [offerKindState, setOfferKindState] = useState<'regression' | 'progression'>('regression');
+  const [propText, setPropText] = useState('');
   const studio = studioOf(plan?.studioId);
+  applySetup(studio.setup);
+  const a = useMemo(() => (plan ? (analyse(plan, studio) as Analysis) : null), [plan, studio]);
   if (!plan || !at) return <Screen top={<><Back /><h1>Block not found</h1></>}><Empty title="This block is no longer in the class" /></Screen>;
   const { item, seg } = at;
   const mv = item.slug ? library().map[item.slug] : undefined;
@@ -341,9 +411,29 @@ export function BlockScreen({ id, itemId }: { id: string; itemId: string }) {
   const mark = (k?: string) => (OPTION_KINDS as { id: string; mark: string }[]).find((o) => o.id === kindOf(k))?.mark || '';
   const chosen = new Set((item.layers || []).filter((l) => typeof l === 'string') as string[]);
   const own = (item.layers || []).filter((l) => typeof l !== 'string') as { text: string }[];
-  const loads = loadsOf(item, mv);
+  const usual = loadsOf(item, mv);
+  // What the class actually uses here: the checks can share a setting with the block before.
+  const inClass = (a?.springPlan as { itemId: string; pass: number; loads: string[] }[] | undefined)?.find((x) => x.itemId === itemId && x.pass === 1)?.loads;
+  const loads = inClass && inClass.length ? inClass : usual;
+  const shared = !!inClass && !item.load && JSON.stringify([...(fitSprings(usual || [], studio) as { loads: string[] }).loads].sort()) !== JSON.stringify([...inClass].sort());
+  const props = item.props || [];
+  const studioProps = (EQUIPMENT as { id: string; label: string }[]);
+  const addOwnProp = async () => {
+    const label = propText.trim().slice(0, 40);
+    if (!label) return;
+    setPropText('');
+    const known = [...studioProps, ...(plan.extraProps || [])].find((x) => x.label.toLowerCase() === label.toLowerCase());
+    const pid = known ? known.id : `p_${slugify(label).replace(/-/g, '_') || 'prop'}`;
+    edit((i) => { i.props = [...new Set([...(i.props || []), pid])].slice(0, 12); });
+    if (known) return;
+    const toStudio = studio.id ? await confirmAsk(`Add ${label} to ${studio.name} too?`, `So it's in the list of props ${studio.name} owns, for every class there. If not, it stays with this class only.`, `Add to ${studio.name}`) : false;
+    if (toStudio) { changeStudio(studio.id, (s) => { s.setup.customProps = [...s.setup.customProps, { id: pid, label }]; s.props = { ...s.props, [pid]: Math.max(1, s.props[pid] || 0) }; }); toast(`${label} added to ${studio.name}.`); }
+    else changeClass(id, (p) => { p.extraProps = [...(p.extraProps || []).filter((x) => x.id !== pid), { id: pid, label }]; });
+  };
   const auto = itemDuration({ ...item, duration: 0 }, mv, tm) as number;
   const regress = vars.filter((v) => kindOf(v.kind) === 'regression');
+  const progress = vars.filter((v) => kindOf(v.kind) === 'progression');
+  const [offerKind, setOfferKind] = [offerKindState, setOfferKindState];
   return (
     <Screen narrow top={<><Back label={plan.title} /><div className="row"><Thumb mv={mv} /><div className="grow"><h1 style={{ fontSize: 'calc(24px * var(--scale))' }}>{mv.name}</h1><div className="m">{plan.noPhases ? 'Block' : seg.name} · {at.index + 1} of {seg.items.length}</div></div>
       <button type="button" className="btn sm" onClick={() => nav.go({ name: 'movement', id: mv.slug })}>About</button></div></>} foot={<button type="button" className="btn p grow" onClick={() => nav.back()}>Done</button>}>
@@ -351,7 +441,8 @@ export function BlockScreen({ id, itemId }: { id: string; itemId: string }) {
         {item.variation && vars.find((v) => v.name === item.variation)?.note ? <div className="m" style={{ marginTop: 6, padding: '0 4px' }}>{vars.find((v) => v.name === item.variation)!.note}</div> : null}</div> : null}
       {mv.apparatus === 'reformer' ? (
         <div className="card">
-          <div className="row between"><div><div className="lab" style={{ padding: 0 }}>Springs · {studio.name}</div><div style={{ marginTop: 8 }}><Springs loads={loads} studio={studio} /></div></div>
+          <div className="row between"><div><div className="lab" style={{ padding: 0 }}>Springs in this class · {studio.name}</div><div style={{ marginTop: 8 }}><Springs loads={loads} studio={studio} /></div>
+            {shared ? <div className="tiny" style={{ marginTop: 6 }}>Usual is <Springs loads={usual} studio={studio} label={false} />: this class keeps the setting from the block before, which suits this movement too, to save a spring change. Set your own below to change it.</div> : null}</div>
             {item.load ? <button type="button" className="btn sm" onClick={() => edit((i) => { delete i.load; })}>Use the usual</button> : null}</div>
           <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line-2)' }}>
             <div className="tiny" style={{ marginBottom: 6 }}>Set your own for this block: tap a weight to add it, tap a spring to take it off.</div>
@@ -371,11 +462,19 @@ export function BlockScreen({ id, itemId }: { id: string; itemId: string }) {
         <Row title="Time" sub={item.duration ? `Your own. Worked out it would be ${fmtClock(auto)}.` : `Worked out for you from the movement, layers and finisher.`} right={<span className="row" style={{ gap: 6 }}>{item.duration ? <button type="button" className="btn sm" onClick={() => edit((i) => { delete i.duration; })}>Auto</button> : null}<ClockInput seconds={item.duration || auto} onChange={(s) => edit((i) => { i.duration = s; })} label="Time for this block" /></span>} />
         <div className="set"><Field label="Reps or counts"><input type="text" maxLength={60} placeholder={mv.reps || 'e.g. 8–10'} value={item.reps || ''} onChange={(e) => edit((i) => { if (e.target.value) i.reps = e.target.value; else delete i.reps; }, true)} /></Field></div>
       </div>
+      <div><div className="lab">Props for this block</div>
+        <div className="card stack-sm" style={{ marginTop: 8 }}>
+          {(mv.equipment || []).length ? <div className="m">The movement uses: {(mv.equipment || []).map((e) => labelOf(studioProps, e)).join(', ')}</div> : null}
+          <div className="chips">{[...studioProps, ...(plan.extraProps || [])].filter((x) => !(mv.equipment || []).includes(x.id)).sort((x, y) => Number(!props.includes(x.id)) - Number(!props.includes(y.id)) || Number(!(Number(studio.props[x.id]) > 0)) - Number(!(Number(studio.props[y.id]) > 0))).map((x) => <button type="button" key={x.id} className={`chip${props.includes(x.id) ? ' on' : ''}`} aria-pressed={props.includes(x.id)} onClick={() => edit((i) => { const s = new Set(i.props || []); if (s.has(x.id)) s.delete(x.id); else s.add(x.id); if (s.size) i.props = [...s].slice(0, 12); else delete i.props; })}>{x.label}{studio.id && !(Number(studio.props[x.id]) > 0) ? ' ·  not here' : ''}</button>)}</div>
+          <div className="row"><input type="text" maxLength={40} placeholder="Another prop, e.g. ankle weights" aria-label="Add a prop of your own" value={propText} onChange={(e) => setPropText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void addOwnProp(); }} /><button type="button" className="btn sm" disabled={!propText.trim()} onClick={() => void addOwnProp()}>Add</button></div>
+        </div></div>
       <div><div className="lab">Offer for anyone who needs less or more</div>
         <div className="card flush" style={{ marginTop: 8 }}>
           {(item.options || []).map((o) => <div className="set" key={o.id}><span className="grow">{mark(o.kind)} {o.title}{o.note ? <div className="m">{o.note}</div> : null}</span><button type="button" className="btn icon ghost" aria-label={`Remove ${o.title}`} onClick={() => edit((i) => { i.options = (i.options || []).filter((x) => x.id !== o.id); if (!i.options.length) delete i.options; })}><Icon name="close" size={16} /></button></div>)}
-          {regress.filter((v) => !(item.options || []).some((o) => o.title === v.name)).slice(0, 3).map((v) => <button type="button" className="set" key={v.name} onClick={() => edit((i) => { i.options = [...(i.options || []), { id: uid('o'), kind: 'regression', title: v.name, ...(v.springs ? { springs: v.springs } : {}), ...(v.note ? { note: v.note } : {}) }].slice(0, 6); })}><span style={{ color: 'var(--accent)', fontWeight: 700 }}>+</span><span className="grow">▼ {v.name}<div className="m">{v.note}</div></span></button>)}
-          <div className="set"><input type="text" maxLength={120} placeholder="Your own offer" aria-label="Your own offer" value={offer} onChange={(e) => setOffer(e.target.value)} /><button type="button" className="btn sm" disabled={!offer.trim()} onClick={() => { edit((i) => { i.options = [...(i.options || []), { id: uid('o'), kind: 'regression', title: offer.trim() }].slice(0, 6); }); setOffer(''); }}>Add</button></div>
+          {[...regress.map((v) => ({ v, kind: 'regression' })), ...progress.map((v) => ({ v, kind: 'progression' }))].filter(({ v }) => !(item.options || []).some((o) => o.title === v.name)).slice(0, 8).map(({ v, kind }) => <button type="button" className="set" key={`${kind}${v.name}`} onClick={() => edit((i) => { i.options = [...(i.options || []), { id: uid('o'), kind, title: v.name, ...(v.springs ? { springs: v.springs } : {}), ...(v.note ? { note: v.note } : {}) }].slice(0, 8); })}><span style={{ color: 'var(--accent)', fontWeight: 700 }}>+</span><span className="grow">{kind === 'progression' ? '▲ Harder' : '▼ Easier'}: {v.name}<div className="m">{v.note}</div></span></button>)}
+          {!progress.length ? <div className="set"><span className="m">No harder versions in the library for this one yet: add your own below, or add one to the movement.</span></div> : null}
+          <div className="set" style={{ flexWrap: 'wrap' }}><div className="seg" role="group" aria-label="Easier or harder"><button type="button" className={offerKind === 'regression' ? 'on' : ''} onClick={() => setOfferKind('regression')}>▼ Easier</button><button type="button" className={offerKind === 'progression' ? 'on' : ''} onClick={() => setOfferKind('progression')}>▲ Harder</button></div>
+            <input type="text" maxLength={120} placeholder={offerKind === 'progression' ? 'Your own harder option' : 'Your own easier option'} aria-label="Your own offer" value={offer} onChange={(e) => setOffer(e.target.value)} style={{ flex: '1 1 160px' }} /><button type="button" className="btn sm" disabled={!offer.trim()} onClick={() => { edit((i) => { i.options = [...(i.options || []), { id: uid('o'), kind: offerKind, title: offer.trim() }].slice(0, 8); }); setOffer(''); }}>Add</button></div>
         </div></div>
       <Field label="Your note" hint="Shown in Play."><textarea maxLength={500} value={item.note || ''} onChange={(e) => edit((i) => { if (e.target.value) i.note = e.target.value; else delete i.note; }, true)} /></Field>
       {tools}

@@ -1,21 +1,24 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { cleanData, cleanMovement, cleanPlan, cleanSettings, cleanStudio, defaultSetup, emptyData, newStudio, slugify } from '../src/lib/clean';
-import { backupText, bringIn, classText, fileNameFor, readIncoming, restoreBackup, studioText, FileProblem } from '../src/lib/files';
-import { blockCount, canRedo, canUndo, changeClass, classTypesFor, findItem, makePlan, nudge, redoClass, undoClass } from '../src/lib/plan';
+import { blankSetup, cleanData, cleanMovement, cleanPlan, cleanSettings, cleanStudio, defaultSetup, emptyData, newStudio, slugify } from '../src/lib/clean';
+import { backupText, bringIn, classText, fileNameFor, packText, readIncoming, restoreBackup, studioText, FileProblem } from '../src/lib/files';
+import { blockCount, canRedo, canUndo, changeClass, classDirty, classTypesFor, findItem, makePlan, nudge, planOf, propsTally, redoClass, saveOpenClass, startClass, undoClass } from '../src/lib/plan';
+import { closeAllDrafts, isDirty, openDraft, editDraft } from '../src/lib/drafts';
+import { nav, setGuard, setLeaveAsker } from '../src/ui/nav';
 import { base32, fetchText, isSendCode, keyOf, offerText, open, seal, unbase32, type Lan } from '../src/lib/send';
-import { _reset, analyse, classOf, duplicateClass, getData, lastTaught, library, logTaught, removeStudio, saveClass, saveMovement, saveStudio, setHidden, setSettings, studioOf, usualStudio } from '../src/lib/store';
+import { _reset, analyse, changeStudio, classOf, duplicateClass, fittedLibrary, getData, lastTaught, library, logTaught, removeStudio, saveClass, saveMovement, saveStudio, setHidden, setSettings, studioOf, usualStudio } from '../src/lib/store';
 import { BRANDS } from '../src/engine';
 import { accentVars } from '../src/ui/theme';
 
 const ALL = { classes: true, movements: true, studios: true, setup: true, series: true };
-function studio(name = 'Harbour', brand = 'balanced_body') { const s = newStudio(name, brand); saveStudio(s); return studioOf(s.id); }
+/** A studio that has been set up (the old default set-up, as an instructor would after a while). */
+function studio(name = 'Harbour', brand = 'balanced_body') { const s = { ...newStudio(name, brand), reformers: 8, setup: defaultSetup(), props: { long_box: 1, short_box: 1, magic_circle: 2, hand_weights: 4, small_ball: 1, loop_band: 1 } }; saveStudio(s); return studioOf(s.id); }
 function drafted(st = studio(), draft = true) {
   const ct = classTypesFor(st)[0];
   const plan = makePlan({ classType: ct, lengthMin: 50, level: 'mixed', goal: 'full_body', focusText: '', studio: st, draft });
   saveClass(plan);
   return classOf(plan.id)!;
 }
-beforeEach(() => _reset());
+beforeEach(() => { closeAllDrafts(); _reset(); });
 
 describe('the library', () => {
   it('ships every movement and series, with unique names', () => {
@@ -59,7 +62,8 @@ describe('cleaning what comes in', () => {
       const d = cleanData(junk);
       expect(Array.isArray(d.classes)).toBe(true);
       expect(d.settings.theme).toBe('auto');
-      expect(d.setup.levels.length).toBeGreaterThan(0);
+      expect(d.settings.trueBlack).toBe(true);
+      expect(Array.isArray(d.studios)).toBe(true);
     }
   });
   it('keeps a plan in shape', () => {
@@ -116,27 +120,45 @@ describe('planning', () => {
     expect(blockCount(plan)).toBe(0);
     expect(plan.segments.length).toBeGreaterThan(0);
   });
-  it('undo and redo step through changes', () => {
+  it('undo and redo step through changes, and nothing is saved until Save', () => {
     const plan = drafted();
     const before = plan.title;
     changeClass(plan.id, (p) => { p.title = 'One'; });
     changeClass(plan.id, (p) => { p.title = 'Two'; });
+    expect(classOf(plan.id)!.title).toBe(before);
+    expect(classDirty(plan.id)).toBe(true);
     expect(canUndo(plan.id)).toBe(true);
-    undoClass(plan.id); expect(classOf(plan.id)!.title).toBe('One');
-    undoClass(plan.id); expect(classOf(plan.id)!.title).toBe(before);
+    undoClass(plan.id); expect(planOf(plan.id)!.title).toBe('One');
+    undoClass(plan.id); expect(planOf(plan.id)!.title).toBe(before);
+    expect(classDirty(plan.id)).toBe(false);
     expect(canRedo(plan.id)).toBe(true);
-    redoClass(plan.id); expect(classOf(plan.id)!.title).toBe('One');
+    redoClass(plan.id); expect(planOf(plan.id)!.title).toBe('One');
     changeClass(plan.id, (p) => { p.title = 'Three'; });
     expect(canRedo(plan.id)).toBe(false);
+    saveOpenClass(plan.id);
+    expect(classOf(plan.id)!.title).toBe('Three');
+    expect(classDirty(plan.id)).toBe(false);
+    expect(canUndo(plan.id)).toBe(true);
+  });
+  it('a new class is not kept until it is saved', () => {
+    const st = studio();
+    const plan = makePlan({ classType: classTypesFor(st)[0], lengthMin: 45, level: 'beginner', goal: 'full_body', focusText: '', studio: st, draft: false });
+    startClass(plan);
+    expect(classOf(plan.id)).toBeUndefined();
+    expect(planOf(plan.id)).toBeTruthy();
+    expect(classDirty(plan.id)).toBe(true);
+    saveOpenClass(plan.id);
+    expect(classOf(plan.id)).toBeTruthy();
+    expect(classDirty(plan.id)).toBe(false);
   });
   it('moves a block up and down, across phases', () => {
     const plan = drafted();
     const seg = plan.segments.find((s) => s.items.length > 1)!;
     const second = seg.items[1].id;
     changeClass(plan.id, (p) => nudge(p, second, -1));
-    expect(findItem(classOf(plan.id)!, second)!.index).toBe(0);
+    expect(findItem(planOf(plan.id)!, second)!.index).toBe(0);
     changeClass(plan.id, (p) => nudge(p, second, -1));
-    const now = classOf(plan.id)!;
+    const now = planOf(plan.id)!;
     expect(blockCount(now)).toBe(blockCount(plan));
     expect(findItem(now, second)).toBeTruthy();
   });
@@ -182,6 +204,7 @@ describe('files', () => {
     saveMovement({ ...base, slug: 'my-own-thing', name: 'My own thing' });
     const plan = drafted(st);
     changeClass(plan.id, (p) => { p.segments[0].items.push({ id: 'x1', slug: 'my-own-thing' }); });
+    saveOpenClass(plan.id);
     const text = classText(classOf(plan.id)!, st, { movements: true, studio: true });
     _reset();
     const inc = readIncoming(text);
@@ -225,7 +248,152 @@ describe('files', () => {
     const s = defaultSetup();
     expect(s.classTypes.length).toBeGreaterThan(0);
     expect(s.levels.length).toBe(6);
+    const b = blankSetup();
+    expect(b.classTypes).toEqual([]);
+    expect(b.lengths).toEqual([]);
+    expect(b.levels.map((l) => l.id)).toEqual(['beginner', 'intermediate', 'advanced']);
+    expect(b.focuses.length).toBe(1);
+    const fresh = newStudio('New');
+    expect(fresh.props).toEqual({});
+    expect(fresh.setup.classTypes).toEqual([]);
+    expect(classTypesFor(fresh)).toEqual([]);
     expect(emptyData().settings.welcomed).toBe(false);
+  });
+});
+
+describe('0.2.0: everything belongs to a studio', () => {
+  it('version 1 data gives each studio its own copy of the old set-up', () => {
+    const old = { v: 1, setup: { ...defaultSetup(), focuses: [{ id: 'glutes', label: 'Bums', muscles: ['glutes'] }] }, studios: [{ id: 'a1', name: 'A', classTypes: [] }, { id: 'b1', name: 'B', classTypes: ['mat_flow'] }], classes: [] };
+    const d = cleanData(old);
+    expect(d.v).toBe(2);
+    expect(d.studios[0].setup.classTypes.length).toBe(defaultSetup().classTypes.length);
+    expect(d.studios[1].setup.classTypes.map((c) => c.id)).toEqual(['mat_flow']);
+    expect(d.studios[0].setup.focuses[0].label).toBe('Bums');
+    expect('setup' in d).toBe(false);
+    // and a v2 studio with nothing set up stays blank
+    const again = cleanData(JSON.parse(JSON.stringify({ ...d, studios: [{ ...d.studios[0], setup: blankSetup() }] })));
+    expect(again.studios[0].setup.classTypes).toEqual([]);
+  });
+  it('a studio change saves only that studio', () => {
+    const a = studio('A'); const b = studio('B');
+    changeStudio(a.id, (s) => { s.setup.focuses = [...s.setup.focuses, { id: 'x', label: 'Runners', muscles: [] }]; });
+    expect(studioOf(a.id).setup.focuses.some((f) => f.label === 'Runners')).toBe(true);
+    expect(studioOf(b.id).setup.focuses.some((f) => f.label === 'Runners')).toBe(false);
+  });
+  it('springs follow the studio: a studio without a spring never gets it, anywhere', () => {
+    const st = studio('Two springs only');
+    saveStudio({ ...st, springs: { light: 1, heavy: 4 } });
+    const s = studioOf(st.id);
+    const fitted = fittedLibrary(s);
+    for (const m of Object.values(fitted)) for (const l of [...(m.load?.springs || []), ...(m.load?.advance || [])]) expect(['light', 'heavy'], m.slug).toContain(l);
+    const plan = drafted(s);
+    const a = analyse(plan, s) as unknown as { springPlan: { loads: string[] }[] };
+    for (const p of a.springPlan) for (const l of p.loads) expect(['light', 'heavy']).toContain(l);
+  });
+  it("a block shows the spring the class actually uses, the same in the list and inside", () => {
+    const st = studio();
+    const plan = drafted(st);
+    const a = analyse(plan, st) as unknown as { springPlan: { itemId: string; pass: number; loads: string[] }[] };
+    const ids = new Set(plan.segments.flatMap((s) => s.items.filter((i) => i.slug && library().map[i.slug]?.apparatus === 'reformer').map((i) => i.id)));
+    for (const id of ids) expect(a.springPlan.some((p) => p.itemId === id && p.pass === 1), id).toBe(true);
+  });
+  it('props: a tally of what blocks use, including props added to a block', () => {
+    const st = studio();
+    const plan = drafted(st);
+    const first = plan.segments.find((s) => s.items.length)!.items[0];
+    changeClass(plan.id, (p) => { const i = findItem(p, first.id)!.item; i.props = ['ankle_weights_x']; p.extraProps = [{ id: 'ankle_weights_x', label: 'Ankle weights' }]; });
+    const tally = propsTally(planOf(plan.id)!);
+    expect(tally.find((x) => x.id === 'ankle_weights_x')).toEqual({ id: 'ankle_weights_x', label: 'Ankle weights', blocks: 1 });
+    saveOpenClass(plan.id);
+    const back = cleanData(JSON.parse(JSON.stringify(getData())));
+    const kept = back.classes.find((c) => c.id === plan.id)!;
+    expect(findItem(kept, first.id)!.item.props).toEqual(['ankle_weights_x']);
+    expect(kept.extraProps).toEqual([{ id: 'ankle_weights_x', label: 'Ankle weights' }]);
+  });
+  it('a pack carries a studio with its set-up, and comes back as the same studio', () => {
+    const st = studio('Packed');
+    changeStudio(st.id, (s) => { s.setup.classTypes = s.setup.classTypes.slice(0, 2); s.props = { magic_circle: 3 }; });
+    drafted(studioOf(st.id));
+    saveMovement({ ...library().list[0], summary: 'Mine' });
+    const inc = readIncoming(packText(studioOf(st.id), { classes: 'studio' }));
+    expect(inc.kind).toBe('pack');
+    expect(inc.studios[0].name).toBe('Packed');
+    expect(inc.studios[0].setup.classTypes.length).toBe(2);
+    expect(inc.studios[0].props).toEqual({ magic_circle: 3 });
+    expect(inc.classes.length).toBe(1);
+    expect(inc.movements.length).toBe(1);
+  });
+  it('settings: true black on by default, accessibility off, and both survive cleaning', () => {
+    const s = cleanSettings({});
+    expect(s.trueBlack).toBe(true);
+    expect(Object.values(s.a11y).every((x) => x === false)).toBe(true);
+    expect(cleanSettings({ trueBlack: false, a11y: { bold: true, nonsense: true } }).a11y).toMatchObject({ bold: true, contrast: false });
+    expect(cleanSettings({ trueBlack: false }).trueBlack).toBe(false);
+  });
+  it('notes on movements are kept, and an empty note is removed', () => {
+    const d = cleanData({ v: 2, notes: { footwork: 'Watch the knees', '': 'x', bad: '' } });
+    expect(d.notes).toEqual({ footwork: 'Watch the knees' });
+  });
+});
+
+describe('0.2.0: leaving unsaved work asks first', () => {
+  const answers: ('save' | 'leave' | null)[] = [];
+  let asked = 0;
+  beforeEach(() => { nav.reset(); asked = 0; setLeaveAsker(async () => { asked++; return answers.shift() ?? null; }); });
+  it('back with nothing changed just goes back', async () => {
+    nav.go({ name: 'studio', id: 's1' }, 'more');
+    openDraft('studio:s1', { name: 'A' });
+    setGuard('more', 1, { key: 'studio:s1', what: 'this studio', save: () => true });
+    await nav.back();
+    expect(asked).toBe(0);
+    expect(nav.get().stacks.more.length).toBe(0);
+  });
+  it('Keep editing stays; Leave drops the changes; Save saves them', async () => {
+    let saved = 0;
+    for (const answer of [null, 'leave', 'save'] as const) {
+      nav.reset();
+      nav.go({ name: 'studio', id: 's1' }, 'more');
+      openDraft('studio:s1', { name: 'A' });
+      editDraft<{ name: string }>('studio:s1', (x) => { x.name = 'B'; });
+      setGuard('more', 1, { key: 'studio:s1', what: 'this studio', save: () => { saved++; return true; } });
+      answers.push(answer);
+      await nav.back();
+      expect(nav.get().stacks.more.length).toBe(answer ? 0 : 1);
+      if (answer) expect(isDirty('studio:s1')).toBe(false);
+      setGuard('more', 1, null);
+    }
+    expect(saved).toBe(1);
+  });
+  it('the class screen still asks after a screen was opened on top of it and closed again', async () => {
+    nav.go({ name: 'class', id: 'c2' }, 'classes');
+    openDraft('class:c2', { t: 1 });
+    editDraft<{ t: number }>('class:c2', (x) => { x.t = 2; });
+    setGuard('classes', 1, { key: 'class:c2', what: 'this class', save: () => true });
+    nav.go({ name: 'block', id: 'c2' }, 'classes');
+    answers.push(null);
+    await nav.home('classes');
+    expect(asked).toBe(1);
+    expect(nav.get().stacks.classes.length).toBe(2);
+    await nav.back();
+    expect(asked).toBe(1);
+    answers.push('save');
+    await nav.back();
+    expect(asked).toBe(2);
+  });
+  it('going back from a screen inside the same work (a block in a class) does not ask', async () => {
+    nav.go({ name: 'class', id: 'c1' }, 'classes');
+    nav.go({ name: 'class-part', id: 'c1' }, 'classes');
+    openDraft('class:c1', { t: 1 });
+    editDraft<{ t: number }>('class:c1', (x) => { x.t = 2; });
+    setGuard('classes', 1, { key: 'class:c1', what: 'this class', save: () => true });
+    setGuard('classes', 2, { key: 'class:c1', what: 'this class', save: () => true });
+    await nav.back();
+    expect(asked).toBe(0);
+    expect(isDirty('class:c1')).toBe(true);
+    answers.push('leave');
+    await nav.back();
+    expect(asked).toBe(1);
+    expect(isDirty('class:c1')).toBe(false);
   });
 });
 

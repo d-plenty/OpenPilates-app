@@ -1,11 +1,12 @@
 // Share and import: sending a class or a studio's set-up to someone (QR code over Wi-Fi, or a file),
 // bringing one in, and backups.
 import { useEffect, useRef, useState } from 'react';
-import { backupNow, backupText, bringIn, classText, fileNameFor, FileProblem, ownMovementsOf, readIncoming, restoreBackup, studioText, summarise, type Incoming, type Take } from '../../lib/files';
+import { backupNow, backupText, bringIn, classText, fileNameFor, FileProblem, ownMovementsOf, packText, readIncoming, restoreBackup, studioText, summarise, type Incoming, type Take } from '../../lib/files';
 import { canSendDirect, deviceLan, fetchText, isSendCode, offerText, SendProblem, type Offer } from '../../lib/send';
 import { deleteBackup, giveFile, listBackups, readBackup, type BackupFile } from '../../lib/storage';
-import { getData, setSettings, studioOf, useData } from '../../lib/store';
-import { Back, Chips, Empty, Row, Screen, Sheet, Stepper, Switch, confirmAsk, toast } from '../bits';
+import { getData, studioOf, useData } from '../../lib/store';
+import { useSettingsDraft } from './Settings';
+import { Back, Chips, Empty, Icon, Row, Screen, Sheet, Stepper, Switch, confirmAsk, toast } from '../bits';
 import { nav } from '../nav';
 import { Qr, Scanner } from '../Qr';
 
@@ -15,7 +16,7 @@ const words = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
 export function ImportSheet({ inc, onClose }: { inc: Incoming; onClose: () => void }) {
   const sum = summarise(inc);
   const hasData = getData().classes.length > 0 || getData().studios.length > 0;
-  const [take, setTake] = useState<Take>({ classes: true, movements: true, studios: inc.kind !== 'class', series: true, setup: inc.kind === 'pack' && !hasData });
+  const [take, setTake] = useState<Take>({ classes: true, movements: true, studios: inc.kind !== 'class', series: true});
   const [how, setHow] = useState<'add' | 'replace'>(hasData ? 'add' : 'replace');
   const done = async () => {
     try {
@@ -27,7 +28,7 @@ export function ImportSheet({ inc, onClose }: { inc: Incoming; onClose: () => vo
         return;
       }
       const r = bringIn(inc, take);
-      const got = [r.classes ? words(r.classes, 'class', 'classes') : '', r.studios ? words(r.studios, 'studio') : '', r.movements ? words(r.movements, 'movement') : '', r.series ? `${r.series} series` : '', r.setup ? 'class set-up' : ''].filter(Boolean);
+      const got = [r.classes ? words(r.classes, 'class', 'classes') : '', r.studios ? words(r.studios, 'studio') : '', r.movements ? words(r.movements, 'movement') : '', r.series ? `${r.series} series` : ''].filter(Boolean);
       toast(got.length ? `Brought in ${got.join(', ')}.${r.skipped ? ` ${r.skipped} already here were left alone.` : ''}` : 'Nothing new: it was all here already.');
       onClose();
       if (r.firstClass && r.classes === 1) nav.go({ name: 'class', id: r.firstClass }, 'classes'); else if (r.classes) nav.home('classes');
@@ -47,7 +48,6 @@ export function ImportSheet({ inc, onClose }: { inc: Incoming; onClose: () => vo
           {sum.movements ? tick('movements', words(sum.movements, 'movement'), 'Made or changed by the sender. One that is already here is left alone.') : null}
           {sum.series ? tick('series', `${sum.series} series`, 'Ready-built runs of movements') : null}
           {sum.studios ? tick('studios', words(sum.studios, 'studio'), inc.studios.map((s) => s.name).join(', ')) : null}
-          {sum.setup ? tick('setup', 'Class set-up', 'Class types, levels, focuses and timing. Replaces yours.') : null}
         </div>
         <p className="tiny">Springs show in your own studio's colours, whatever the sender uses.</p>
       </>}
@@ -154,6 +154,7 @@ export function ShareScreen({ classId, studioId }: { classId?: string; studioId?
           <Row icon="classes" title="A class" sub="Open the class and tap the share button" onClick={() => nav.home('classes')} />
           <Row icon="home" title="A studio's set-up" sub="Open the studio in My studios" onClick={() => nav.go({ name: 'studios' })} />
           <Row icon="box" title="Everything, as a backup file" onClick={() => nav.go({ name: 'backups' })} />
+          <Row icon="server" title="A pack" sub="A studio's set-up, your own movements and series, and classes. OpenPilates Server reads it too." onClick={() => nav.go({ name: 'pack' })} />
         </div>
       </> : null}
       {imp.inc ? <ImportSheet inc={imp.inc} onClose={imp.close} /> : null}
@@ -162,6 +163,7 @@ export function ShareScreen({ classId, studioId }: { classId?: string; studioId?
 }
 
 export function BackupsScreen() {
+  const sd = useSettingsDraft();
   const d = useData();
   const [files, setFiles] = useState<BackupFile[] | null>(null);
   const imp = useImport();
@@ -169,10 +171,10 @@ export function BackupsScreen() {
   useEffect(refresh, []);
   const last = d.settings.lastBackup ? new Date(d.settings.lastBackup).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : 'never';
   return (
-    <Screen narrow top={<><Back /><h1>Backups</h1><div className="m">Everything is kept on this device only. A backup is your safety net if the app is deleted or the device is lost.</div></>}>
+    <Screen narrow top={<>{sd.top('Backups', 'Back')}<div className="m">Everything is kept on this device only. A backup is your safety net if the app is deleted or the device is lost.</div></>}>
       <div className="card flush">
-        <Row title="Back up automatically" sub={`When you open the app, about once a day. Last backup: ${last}.`} right={<Switch on={d.settings.autoBackup} onChange={(on) => setSettings({ autoBackup: on })} label="Back up automatically" />} />
-        <Row title="Backups to keep" sub="Older ones are removed" right={<Stepper value={d.settings.keepBackups} min={1} max={30} label="backup" onChange={(n) => setSettings({ keepBackups: n })} />} />
+        <Row title="Back up automatically" sub={`When you open the app, about once a day. Last backup: ${last}.`} right={<Switch on={sd.s.autoBackup} onChange={(on) => sd.edit({ autoBackup: on })} label="Back up automatically" />} />
+        <Row title="Backups to keep" sub="Older ones are removed" right={<Stepper value={sd.s.keepBackups} min={1} max={30} label="backup" onChange={(n) => sd.edit({ keepBackups: n })} />} />
         <Row icon="box" title="Back up now" onClick={() => void backupNow().then(() => { toast('Backed up.'); refresh(); }).catch(() => toast("Couldn't write the backup."))} />
         <Row icon="share" title="Save a backup somewhere else" sub="AirDrop, Files, email: a copy off this device" onClick={() => void giveFile(fileNameFor('', 'backup'), backupText()).catch(() => toast("Couldn't make the file."))} />
       </div>
@@ -185,6 +187,25 @@ export function BackupsScreen() {
       ))}</div> : <Empty title="No backups yet" text="One is made the next time you open the app, or tap Back up now." />}
       <FileButton label="Restore from a file" onText={(t) => imp.read(t)} />
       {imp.inc ? <ImportSheet inc={imp.inc} onClose={() => { imp.close(); refresh(); }} /> : null}
+    </Screen>
+  );
+}
+
+/** Making a pack: what OpenPilates Server calls moving your work, or sending it to a studio. */
+export function PackScreen() {
+  const d = useData();
+  const [studioId, setStudioId] = useState(d.settings.usualStudio || d.studios[0]?.id || '');
+  const [classes, setClasses] = useState<'all' | 'studio' | 'none'>('studio');
+  const studio = d.studios.find((s) => s.id === studioId);
+  const here = d.classes.filter((c) => c.studioId === studioId).length;
+  return (
+    <Screen narrow top={<><Back /><h1>Make a pack</h1><div className="m">One file with a studio's set-up and reformers, your own and changed movements, your series and the classes you choose. Another OpenPilates app or OpenPilates Server can bring it in.</div></>}
+      foot={<button type="button" className="btn p grow" disabled={!studio} onClick={() => { if (studio) void giveFile(fileNameFor(studio.name, 'pack'), packText(studio, { classes })).catch(() => toast("Couldn't make the file.")); }}><Icon name="share" size={18} />Make the pack</button>}>
+      {!d.studios.length ? <Empty title="No studios yet" text="A pack is built around a studio. Add one in More → My studios." /> : <>
+        <div><div className="lab">Studio</div><div style={{ marginTop: 8 }}><Chips options={d.studios.map((s) => ({ id: s.id, label: s.name }))} value={studioId} onPick={setStudioId} /></div></div>
+        <div><div className="lab">Classes</div><div style={{ marginTop: 8 }}><Chips options={[{ id: 'studio', label: `Planned for ${studio?.name || 'it'} (${here})` }, { id: 'all', label: `All (${d.classes.length})` }, { id: 'none', label: 'None' }]} value={classes} onPick={(v) => setClasses(v as typeof classes)} /></div></div>
+        <div className="card stack-sm"><b>Also in the pack</b><div className="m">{Object.keys(d.movements).length} movements you made or changed · {d.series.length} series of your own · what you took out of the library</div></div>
+      </>}
     </Screen>
   );
 }

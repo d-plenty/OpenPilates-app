@@ -1,8 +1,10 @@
 // The small pieces every screen is built from.
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { figure, figureFrames, fitSprings, springFor } from '../engine';
 import type { Movement, Studio } from '../lib/types';
-import { nav } from './nav';
+import { isDirty, useDrafts } from '../lib/drafts';
+import { getData } from '../lib/store';
+import { nav, setGuard, setLeaveAsker, type Tab } from './nav';
 
 const ICONS: Record<string, string> = {
   classes: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
@@ -49,6 +51,28 @@ export function Icon({ name, size = 20, fill }: { name: string; size?: number; f
       <path d={ICONS[name] || ''} />
     </svg>
   );
+}
+
+/** Where a screen sits: its tab, and how deep in that tab's stack (0 is the tab's first screen). */
+export const Spot = createContext<{ tab: Tab; depth: number }>({ tab: 'classes', depth: 0 });
+
+/**
+ * A screen that edits something unsaved (lib/drafts.ts) says so here. Back, or leaving the tab,
+ * then asks to save it or leave it behind. Returns whether there is anything unsaved.
+ */
+export function useEditing(key: string, what: string, save: () => boolean | Promise<boolean>): boolean {
+  useDrafts();
+  const at = useContext(Spot);
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  // Stays registered while screens are opened on top of this one (only the top one is drawn);
+  // nav drops it when this screen is closed.
+  useEffect(() => { setGuard(at.tab, at.depth, { key, what, save: () => saveRef.current() }); }, [at.tab, at.depth, key, what]);
+  return isDirty(key);
+}
+/** Save, top right. Greyed out when there is nothing to save. */
+export function SaveButton({ dirty, onSave, label = 'Save' }: { dirty: boolean; onSave: () => void; label?: string }) {
+  return <button type="button" className={`btn sm${dirty ? ' p' : ''}`} disabled={!dirty} onClick={onSave} aria-label={dirty ? `${label}, there are unsaved changes` : `${label}, nothing to save`}>{dirty ? label : 'Saved'}</button>;
 }
 
 export function Back({ label = 'Back' }: { label?: string }) {
@@ -123,22 +147,28 @@ export function Sheet({ title, onClose, children, foot }: { title: string; onClo
 type ToastMsg = { text: string; action?: { label: string; run: () => void } };
 let showToast: (t: ToastMsg | null) => void = () => {};
 export function toast(text: string, action?: ToastMsg['action']) { showToast({ text, action }); }
-type Ask = { title: string; text?: string; yes: string; danger?: boolean; resolve: (ok: boolean) => void };
+type Choice = { id: string; label: string; kind?: 'p' | 'danger' | '' };
+type Ask = { title: string; text?: string; choices: Choice[]; resolve: (id: string | null) => void };
 let showAsk: (a: Ask | null) => void = () => {};
-export const confirmAsk = (title: string, text: string, yes: string, danger = false) => new Promise<boolean>((resolve) => showAsk({ title, text, yes, danger, resolve }));
+export const confirmAsk = (title: string, text: string, yes: string, danger = false) => new Promise<boolean>((resolve) => showAsk({ title, text, choices: [{ id: 'yes', label: yes, kind: danger ? 'danger' : 'p' }], resolve: (id) => resolve(id === 'yes') }));
+/** A question with more than one answer. Resolves to the id picked, or null for Cancel. */
+export const chooseAsk = (title: string, text: string, choices: Choice[]) => new Promise<string | null>((resolve) => showAsk({ title, text, choices, resolve }));
+// Leaving unsaved work (ui/nav.ts asks through this).
+setLeaveAsker((what) => chooseAsk(`Save ${what}?`, 'You have changes that are not saved yet.', [{ id: 'leave', label: 'Leave without saving', kind: 'danger' }, { id: 'save', label: 'Save', kind: 'p' }]) as Promise<'save' | 'leave' | null>);
 
 export function Overlays() {
   const [t, setT] = useState<ToastMsg | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
   useEffect(() => { showToast = setT; showAsk = setAsk; return () => { showToast = () => {}; showAsk = () => {}; }; }, []);
-  useEffect(() => { if (!t) return; const id = setTimeout(() => setT(null), t.action ? 6000 : 3200); return () => clearTimeout(id); }, [t]);
-  const answer = (ok: boolean) => { ask?.resolve(ok); setAsk(null); };
+  useEffect(() => { if (!t) return; const slow = getData().settings.a11y.slowMessages ? 3 : 1; const id = setTimeout(() => setT(null), (t.action ? 6000 : 3200) * slow); return () => clearTimeout(id); }, [t]);
+  const answer = (id: string | null) => { ask?.resolve(id); setAsk(null); };
   return (
     <>
       {t ? <div className="toast" role="status"><span>{t.text}</span>{t.action ? <button type="button" onClick={() => { t.action!.run(); setT(null); }}>{t.action.label}</button> : null}</div> : null}
       {ask ? (
-        <Sheet title={ask.title} onClose={() => answer(false)} foot={<><button type="button" className="btn grow" onClick={() => answer(false)}>Cancel</button><button type="button" className={`btn grow ${ask.danger ? 'danger' : 'p'}`} onClick={() => answer(true)}>{ask.yes}</button></>}>
+        <Sheet title={ask.title} onClose={() => answer(null)} foot={ask.choices.length > 1 ? undefined : <><button type="button" className="btn grow" onClick={() => answer(null)}>Cancel</button><button type="button" className={`btn grow ${ask.choices[0].kind || ''}`} onClick={() => answer(ask.choices[0].id)}>{ask.choices[0].label}</button></>}>
           {ask.text ? <p className="m">{ask.text}</p> : null}
+          {ask.choices.length > 1 ? <div className="stack-sm">{[...ask.choices].reverse().map((c) => <button type="button" key={c.id} className={`btn wide ${c.kind || ''}`} onClick={() => answer(c.id)}>{c.label}</button>)}<button type="button" className="btn wide ghost" onClick={() => answer(null)}>Keep editing</button></div> : null}
         </Sheet>
       ) : null}
     </>

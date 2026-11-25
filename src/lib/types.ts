@@ -61,6 +61,8 @@ export interface Item {
   options?: BlockOption[];
   note?: string;
   load?: { springs: string[] };
+  /** Props added to this block on top of what the movement needs (ids from the studio's list, or the class's own). */
+  props?: string[];
 }
 export interface Segment { id: string; name: string; role: string; minutes?: number; bothSides?: boolean; song?: string; items: Item[] }
 
@@ -86,6 +88,8 @@ export interface ClassPlan {
   updatedAt: string;
   /** Came from another instructor or from OpenPilates Server. */
   from?: string;
+  /** Props named in this class that its studio's list doesn't have. */
+  extraProps?: Named[];
 }
 
 export interface Studio {
@@ -97,10 +101,10 @@ export interface Studio {
   reformers: number;
   springs: Record<string, number>;
   springOverrides: Record<string, { name: string; short: string; color: string }>;
-  /** Props it has, by id: a count, or 1 for "has it". */
+  /** Props it has, by id, and how many. */
   props: Record<string, number>;
-  /** Class types taught here; empty means all of them. */
-  classTypes: string[];
+  /** How classes are set up here: class types, levels, focuses, timing, parts of the class, lists. */
+  setup: Setup;
   updatedAt: string;
 }
 
@@ -111,7 +115,7 @@ export interface TimingRow { id: string; label: string; note?: string; seconds: 
 export interface Focus { id: string; label: string; muscles: string[]; purpose?: string; maxIntensity?: number; avoid?: string[] }
 export interface Named { id: string; label: string; group?: string }
 
-/** How classes are set up: the same for every studio. (OpenPilates Server keeps these on its Studio page.) */
+/** How classes are set up at one studio. (OpenPilates Server keeps these on its Studio page.) */
 export interface Setup {
   levels: ClassLevel[];
   classTypes: ClassType[];
@@ -145,6 +149,8 @@ export interface Settings {
   playDark: boolean;
   keepAwake: boolean;
   textSize: 'normal' | 'large' | 'larger';
+  /** Accessibility, as in Restock. */
+  a11y: { bold: boolean; contrast: boolean; spacing: boolean; links: boolean; big: boolean; motion: boolean; slowMessages: boolean };
   usualStudio?: string;
   autoBackup: boolean;
   keepBackups: number;
@@ -154,9 +160,8 @@ export interface Settings {
 }
 
 export interface Data {
-  v: 1;
+  v: 2;
   settings: Settings;
-  setup: Setup;
   studios: Studio[];
   classes: ClassPlan[];
   taught: Taught[];
@@ -167,4 +172,6 @@ export interface Data {
   shown: string[];
   series: Series[];
   hiddenSeries: string[];
+  /** Your own notes on movements, by slug. */
+  notes: Record<string, string>;
 }
