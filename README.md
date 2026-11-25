@@ -1,3 +1,8 @@
+> **⏸ On pause.** This project isn't being worked on or maintained right now. I'm building
+> [Plenty Flow](https://github.com/d-plenty/Plentyflowpilates), a Pilates class planner for iPhone
+> and iPad, and I'll come back to this at a later date. Issues and pull requests may not get a reply
+> until then.
+
 # OpenPilates
 
 Class planning for mat and reformer Pilates instructors, on your iPhone or iPad.
